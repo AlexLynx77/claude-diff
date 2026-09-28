@@ -180,8 +180,9 @@ class Tracker {
   /**
    * Compares the workspace with the cache. When `attribute` is true, every change not made by
    * the user/extension is reported to `onChange(file, before)` (before = null for a new file).
+   * `fromGit(key)` tells that git (checkout, pull...) wrote the file: never Claude's change.
    */
-  async sync(folders, attribute, isPending, onChange) {
+  async sync(folders, attribute, isPending, onChange, fromGit = () => false) {
     const { files, failed, truncated } = await this.walk(folders);
     this.truncated = truncated;
     let changes = 0;
@@ -189,7 +190,8 @@ class Tracker {
       const rec = this.cache.get(key);
       if (rec && rec.mtime === st.mtime && rec.size === st.size) continue;
       const content = await this.readText(st.path, st.size);
-      if (attribute && this.ready && !this.isExpected(key, content) && !isPending(key)) {
+      const byGit = fromGit(key);
+      if (attribute && this.ready && !byGit && !this.isExpected(key, content) && !isPending(key)) {
         if (!rec) {
           if (content !== undefined) {
             await onChange(st.path, null);
@@ -208,7 +210,8 @@ class Tracker {
       for (const [key, rec] of [...this.cache]) {
         if (files.has(key)) continue;
         if (unsure.some((u) => key === u || key.startsWith(u + path.sep))) continue;
-        if (attribute && this.ready && !this.isExpected(key, null) && !isPending(key) && rec.content !== undefined) {
+        const byGit = fromGit(key);
+        if (attribute && this.ready && !byGit && !this.isExpected(key, null) && !isPending(key) && rec.content !== undefined) {
           await onChange(rec.path, rec.content);
           changes++;
         }
