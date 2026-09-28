@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { splitLines, detectEol, diffLines, planReplace } = require('./diff');
 const { Activity, Tracker, norm } = require('./tracker');
+const { GitWatch, show } = require('./git');
 
 const SCHEME = 'claude-diff';
 /** Read-only review view of a file: old lines shown (greyed) right above the new ones. */
@@ -15,6 +16,8 @@ const ACTIVE_MS = Number(process.env.CLAUDE_DIFF_ACTIVE_MS) || 2 * 60 * 1000;
 /** Workspace scan period while Claude is not working (keeps the "before" contents current). */
 const IDLE_SCAN_MS = 15 * 1000;
 const LEGACY_HOOK_FILE = 'claude-diff-hook.js';
+/** In a git repository, a change waits this long before it is called Claude's: git may still be writing (see git.js). */
+const GIT_SETTLE_MS = 1500;
 
 /**
  * @typedef {{aStart: number, aEnd: number, bStart: number, bEnd: number}} Hunk
@@ -585,6 +588,30 @@ async function writeBaseline(entry, content) {
   await discard(rest);
 }
 
+/**
+ * git (checkout, pull, merge, rebase...) rewrote files whose changes are still pending. When their
+ * "before" is what HEAD used to hold, it becomes what the new HEAD holds: Claude's changes stay,
+ * what came from git is not shown as Claude's anymore.
+ */
+async function rebasePending(ops) {
+  for (const op of ops) {
+    if (!op.rebase || !op.old || !op.new) continue;
+    for (const entry of [...entries.values()]) {
+      if (entry.isNew || entry.deleted || (op.files && !op.files.has(norm(entry.file)))) continue;
+      try {
+        const rel = path.relative(op.top, entry.file).split(path.sep).join('/');
+        const before = await show(op.top, op.old, rel);
+        if (before === null || !sameText(stripBom(before), entry.baseline)) continue;
+        const after = await show(op.top, op.new, rel);
+        if (after === null) continue;
+        await writeBaseline(entry, (entry.bom ? '﻿' : '') + splitLines(stripBom(after)).join(detectEol(entry.baseline)));
+      } catch {
+        // snapshot removed meanwhile: nothing left to rebase
+      }
+    }
+  }
+}
+
 /** Accept one hunk: fold it into the baseline. */
 async function keepHunk(fileArg, sig) {
   const [entry, hunk] = findHunk(fileArg, sig);
@@ -1120,12 +1147,44 @@ async function activate(context) {
   };
 
   // ---- change detection: Claude activity + workspace scan
+  const gitWatch = new GitWatch();
+  /** Changes seen but not yet called Claude's: norm(path) -> {file, before, at}. */
+  const held = new Map();
+  const flushHeld = async (all = false) => {
+    let flushed = 0;
+    for (const [key, h] of [...held]) {
+      if (!all && Date.now() - h.at < GIT_SETTLE_MS) continue;
+      held.delete(key);
+      log.info(`changed by Claude: ${h.file}${h.before === null ? ' (new)' : ''}`);
+      await writeSnapshot(h.file, h.before, 'claude');
+      flushed++;
+    }
+    return flushed;
+  };
   let wasActive = false;
   let lastScan = 0;
   let scanEvery = 1000;
   const detect = async () => {
     const folders = folderPaths();
     if (!folders.length) return;
+    // Files written by git (checkout, pull, merge...) are never Claude's changes.
+    const g = await gitWatch.poll(folders);
+    if (g.busy) return; // git is writing the working tree: look again once it is done
+    if (g.fresh.length) {
+      for (const op of g.fresh) {
+        log.info(`git changed the working tree (${op.files ? plural(op.files.size, 'file') : 'unknown files'})`);
+        for (const key of [...held.keys()]) {
+          if (op.files && !op.files.has(key)) continue;
+          held.delete(key);
+          gitWatch.take(key); // already seen by a scan: git's write is accounted for
+        }
+      }
+      await rebasePending(g.fresh);
+      await refresh();
+    }
+    const flushed = await flushHeld();
+    if (flushed) await refresh();
+
     const last = await activity.last(folders);
     const active = last > 0 && Date.now() - last < ACTIVE_MS;
     const due = Date.now() - lastScan > (active ? scanEvery : IDLE_SCAN_MS);
@@ -1136,10 +1195,20 @@ async function activate(context) {
     if (active !== wasActive) log.info(active ? 'Claude is working' : 'Claude is idle');
     wasActive = active;
     const t0 = Date.now();
-    const made = await tracker.sync(folders, attribute, (key) => trackedFiles.has(key), async (file, before) => {
-      log.info(`changed by Claude: ${file}${before === null ? ' (new)' : ''}`);
-      await writeSnapshot(file, before, 'claude');
-    });
+    const made = await tracker.sync(
+      folders,
+      attribute,
+      (key) => trackedFiles.has(key) || held.has(key),
+      async (file, before) => {
+        if (gitWatch.active) {
+          held.set(norm(file), { file, before, at: Date.now() }); // git may be about to claim it
+        } else {
+          log.info(`changed by Claude: ${file}${before === null ? ' (new)' : ''}`);
+          await writeSnapshot(file, before, 'claude');
+        }
+      },
+      (key) => gitWatch.take(key)
+    );
     lastScan = Date.now();
     scanEvery = Math.max(1000, (lastScan - t0) * 4); // stay light on big or slow (/mnt/c) projects
     if (tracker.truncated) log.warn('workspace too large: only the first 20000 files are tracked');

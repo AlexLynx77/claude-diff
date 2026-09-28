@@ -33,7 +33,13 @@ const dirs = Object.fromEntries(['workspace', 'config', 'user', 'extensions'].ma
 Object.values(dirs).forEach((d) => fs.mkdirSync(d));
 const out = path.join(tmp, 'result.json');
 
-const env = { ...process.env, E2E_OUT: out, CLAUDE_CONFIG_DIR: dirs.config, CLAUDE_DIFF_ACTIVE_MS: '120000' };
+// The workspace is a git repository, to check that checkout / merge / pull are not taken for Claude.
+const gitOk = ['init -q -b main', 'config user.name t', 'config user.email t@t', 'config core.autocrlf false', 'config commit.gpgsign false'].every(
+  (a) => spawnSync('git', a.split(' '), { cwd: dirs.workspace, stdio: 'ignore' }).status === 0
+);
+if (!gitOk) console.log('git not found: the git scenarios are skipped.');
+
+const env = { ...process.env, E2E_OUT: out, CLAUDE_CONFIG_DIR: dirs.config, CLAUDE_DIFF_ACTIVE_MS: '120000', ...(gitOk ? { E2E_GIT: '1' } : {}) };
 delete env.ELECTRON_RUN_AS_NODE; // would make VS Code start as a plain Node.js
 
 console.log('Starting VS Code (about a minute)...');

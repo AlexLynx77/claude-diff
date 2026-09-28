@@ -4,8 +4,10 @@
 // test edits files on disk the way Claude would and drives the extension's commands.
 const vscode = require('vscode');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const vm = require('vm');
+const { execFileSync } = require('child_process');
 
 const pkg = require('../../package.json');
 const results = [];
@@ -165,6 +167,80 @@ async function main() {
   }
   check('undoing every change of d.css returns the exact original', !entry('d.css') && read('d.css') === ORIGINAL['d.css'], JSON.stringify(read('d.css')));
   check('nothing is left to review', api._entries().length === 0, JSON.stringify(api._entries().map((x) => path.basename(x.file))));
+
+  if (process.env.E2E_GIT) await gitScenarios({ ws, api, put, read, entry, beat });
+}
+
+// git rewrites files while Claude is "active": that must never bring reviewed changes back.
+async function gitScenarios({ ws, api, put, read, entry, beat }) {
+  const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const names = () => JSON.stringify(api._entries().map((x) => path.basename(x.file)));
+  /** Lets the extension poll for a while, Claude staying "active" all along. */
+  const settle = async (ms) => {
+    for (let t = 0; t < ms; t += 500) {
+      beat();
+      await sleep(500);
+    }
+  };
+  // a branch prepared elsewhere (a second worktree): nothing is written in the workspace
+  const branch = (name, files, message) => {
+    const wt = path.join(os.tmpdir(), `claude-diff-wt-${name}-${Date.now()}`);
+    git(ws, 'worktree', 'add', '-q', '-b', name, wt, 'HEAD');
+    for (const [f, s] of Object.entries(files)) fs.writeFileSync(path.join(wt, f), s);
+    git(wt, 'commit', '-q', '-am', message);
+    git(ws, 'worktree', 'remove', '--force', wt);
+  };
+
+  const ONE = read('a.json'); // Claude's version, kept: a reviewed change
+  git(ws, 'add', '-A');
+  git(ws, 'commit', '-q', '-m', 'base');
+  await settle(4000);
+  check('git: a commit is not a change to review', api._entries().length === 0, names());
+
+  const OTHER = '{"other": true}\n';
+  branch('other', { 'a.json': OTHER, 'g.txt': 'keep me\nstay2\nm1\nm2\nm3\n' }, 'other');
+  git(ws, 'checkout', '-q', 'other');
+  await settle(6000);
+  check("git: checkout of another branch is not Claude's change", api._entries().length === 0, names());
+  check('git: checkout really rewrote the files', read('a.json') === OTHER);
+
+  git(ws, 'checkout', '-q', 'main');
+  await settle(6000);
+  check("git: going back to the branch is not Claude's change either", api._entries().length === 0 && read('a.json') === ONE, names());
+
+  git(ws, 'merge', '-q', 'other');
+  await settle(6000);
+  check("git: merge / pull is not Claude's change", api._entries().length === 0 && read('a.json') === OTHER, names());
+
+  // Claude still gets caught afterwards, on the very files git just wrote
+  put('a.json', '{"other": false}\n');
+  const caught = await until(() => {
+    beat();
+    return entry('a.json');
+  }, 30000);
+  check("git: Claude's edit of a file git just wrote is still detected", caught && caught.hunks.length === 1, names());
+  await vscode.commands.executeCommand('claudeDiff.keepFile', entry('a.json').file);
+  await sleep(1500);
+
+  // Claude's pending change stays reviewable when git rewrites the same file around it
+  branch('up', { 'g.txt': 'keep me\nstay2\nm1\nm2\nm3x\n' }, 'up');
+  put('g.txt', 'kept\nstay2\nm1\nm2\nm3\n');
+  const pending = await until(() => {
+    beat();
+    return entry('g.txt');
+  }, 30000);
+  check("git: Claude's edit of g.txt is detected", !!pending, names());
+  git(ws, 'checkout', '-q', '-m', 'up');
+  await settle(6000);
+  const g = entry('g.txt');
+  check(
+    "git: after a checkout, only Claude's own lines of g.txt are still to review",
+    g && read('g.txt') === 'kept\nstay2\nm1\nm2\nm3x\n' && g.hunks.length === 1 && g.added === 1 && g.removed === 1,
+    g ? `${JSON.stringify(read('g.txt'))} hunks=${JSON.stringify(g.hunks)}` : names()
+  );
+  await vscode.commands.executeCommand('claudeDiff.keepAll');
+  await sleep(1500);
+  check('git: nothing is left to review at the end', api._entries().length === 0, names());
 }
 
 async function run() {
