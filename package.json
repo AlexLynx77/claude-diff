@@ -1,0 +1,308 @@
+{
+  "name": "claude-diff",
+  "displayName": "Claude Diff",
+  "description": "Unofficial companion for Claude Code: see, keep or undo the file changes Claude makes, right in the editor. Nothing to install or configure.",
+  "version": "0.8.4",
+  "publisher": "local",
+  "author": "pierralex2077",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pierralex2077/claude-diff.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pierralex2077/claude-diff/issues"
+  },
+  "homepage": "https://github.com/pierralex2077/claude-diff#readme",
+  "keywords": [
+    "claude",
+    "claude code",
+    "diff",
+    "review",
+    "ai"
+  ],
+  "scripts": {
+    "test": "node test/diff.fuzz.js && node test/e2e/run.js",
+    "test:unit": "node test/diff.fuzz.js",
+    "test:e2e": "node test/e2e/run.js",
+    "package": "npx @vscode/vsce package"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "colors": [
+      {
+        "id": "claudeDiff.pendingForeground",
+        "description": "Colour of the dot shown next to files changed by Claude that are waiting for review.",
+        "defaults": {
+          "dark": "#c586ff",
+          "light": "#8250df",
+          "highContrast": "#d7a5ff",
+          "highContrastLight": "#6f42c1"
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Claude Diff",
+      "properties": {
+        "claudeDiff.showExplorerDot": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show a coloured dot next to files (and their folders) changed by Claude until you keep or undo the changes."
+        },
+        "claudeDiff.autoOpen": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Automatically open a file (without taking focus) the first time Claude changes it, so you can review it inline."
+        },
+        "claudeDiff.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "node_modules",
+            ".git",
+            "dist",
+            "build",
+            "out",
+            ".next",
+            ".nuxt",
+            ".svelte-kit",
+            "target",
+            "__pycache__",
+            ".venv",
+            "venv",
+            ".cache",
+            "coverage",
+            ".turbo",
+            ".gradle",
+            "obj"
+          ],
+          "markdownDescription": "Folder names never tracked (dependencies, build output...). Everything else is tracked, including git-ignored files such as `.env`."
+        },
+        "claudeDiff.reviewPlainTextLanguages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "json",
+            "jsonc",
+            "css",
+            "scss",
+            "less"
+          ],
+          "markdownDescription": "Languages whose review view is shown as plain text (no syntax highlighting). The review view mixes old and new lines, so a language server that validates every document would report syntax errors that are not in the real file."
+        },
+        "claudeDiff.reviewView": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Open changed files in a review view showing the old lines (greyed) right above the new ones, with Keep / Undo on each block. Use **Edit file** in it to edit the file itself."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeDiff",
+          "title": "Claude Diff",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeDiff": [
+        {
+          "id": "claudeDiff.changes",
+          "name": "Files to review"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "claudeDiff.changes",
+        "contents": "No changes from Claude Code to review.\n\nWhen Claude changes files in this workspace, they show up here, with a dot in the Explorer and a review bar at the bottom."
+      }
+    ],
+    "commands": [
+      {
+        "command": "claudeDiff.refresh",
+        "title": "Claude Diff: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeDiff.openFile",
+        "title": "Claude Diff: Open File"
+      },
+      {
+        "command": "claudeDiff.openDiff",
+        "title": "Claude Diff: Show Side-by-Side Diff",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "claudeDiff.keepFile",
+        "title": "Claude Diff: Keep Changes in This File",
+        "icon": "$(check)"
+      },
+      {
+        "command": "claudeDiff.undoFile",
+        "title": "Claude Diff: Undo Changes in This File",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudeDiff.keepHunk",
+        "title": "Claude Diff: Keep Change"
+      },
+      {
+        "command": "claudeDiff.undoHunk",
+        "title": "Claude Diff: Undo Change"
+      },
+      {
+        "command": "claudeDiff.keepAll",
+        "title": "Claude Diff: Keep All Changes",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "claudeDiff.undoAll",
+        "title": "Claude Diff: Undo All Changes",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "claudeDiff.nextFile",
+        "title": "Claude Diff: Next Changed File",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "claudeDiff.prevFile",
+        "title": "Claude Diff: Previous Changed File",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "claudeDiff.restoreLastUndo",
+        "title": "Claude Diff: Restore Last Undo",
+        "icon": "$(history)"
+      },
+      {
+        "command": "claudeDiff.pickFile",
+        "title": "Claude Diff: Go to Changed File…",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "claudeDiff.editFile",
+        "title": "Claude Diff: Edit File",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "claudeDiff.reviewFile",
+        "title": "Claude Diff: Review Changes in This File",
+        "icon": "$(eye)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "claudeDiff.openFile",
+          "when": "false"
+        },
+        {
+          "command": "claudeDiff.keepHunk",
+          "when": "false"
+        },
+        {
+          "command": "claudeDiff.undoHunk",
+          "when": "false"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "claudeDiff.prevFile",
+          "when": "claudeDiff.activeFileHasChanges",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeDiff.nextFile",
+          "when": "claudeDiff.activeFileHasChanges",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeDiff.keepFile",
+          "when": "claudeDiff.activeFileHasChanges",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudeDiff.undoFile",
+          "when": "claudeDiff.activeFileHasChanges",
+          "group": "navigation@4"
+        },
+        {
+          "command": "claudeDiff.openDiff",
+          "when": "claudeDiff.activeFileHasChanges",
+          "group": "1_claudeDiff@1"
+        },
+        {
+          "command": "claudeDiff.keepAll",
+          "when": "claudeDiff.hasChanges",
+          "group": "1_claudeDiff@2"
+        },
+        {
+          "command": "claudeDiff.undoAll",
+          "when": "claudeDiff.hasChanges",
+          "group": "1_claudeDiff@3"
+        },
+        {
+          "command": "claudeDiff.editFile",
+          "when": "claudeDiff.activeFileHasChanges && resourceScheme == claude-review",
+          "group": "navigation@5"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "claudeDiff.refresh",
+          "when": "view == claudeDiff.changes",
+          "group": "navigation@1"
+        },
+        {
+          "command": "claudeDiff.keepAll",
+          "when": "view == claudeDiff.changes",
+          "group": "navigation@2"
+        },
+        {
+          "command": "claudeDiff.undoAll",
+          "when": "view == claudeDiff.changes",
+          "group": "navigation@3"
+        },
+        {
+          "command": "claudeDiff.restoreLastUndo",
+          "when": "view == claudeDiff.changes",
+          "group": "1_setup"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "claudeDiff.openDiff",
+          "when": "view == claudeDiff.changes",
+          "group": "inline@1"
+        },
+        {
+          "command": "claudeDiff.keepFile",
+          "when": "view == claudeDiff.changes",
+          "group": "inline@2"
+        },
+        {
+          "command": "claudeDiff.undoFile",
+          "when": "view == claudeDiff.changes",
+          "group": "inline@3"
+        }
+      ]
+    }
+  }
+}
