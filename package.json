@@ -4,16 +4,16 @@
   "description": "Unofficial companion for Claude Code: see, keep or undo the file changes Claude makes, right in the editor. Nothing to install or configure.",
   "version": "0.8.4",
   "publisher": "local",
-  "author": "pierralex2077",
+  "author": "AlexLynx77",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/pierralex2077/claude-diff.git"
+    "url": "https://github.com/AlexLynx77/claude-diff.git"
   },
   "bugs": {
-    "url": "https://github.com/pierralex2077/claude-diff/issues"
+    "url": "https://github.com/AlexLynx77/claude-diff/issues"
   },
-  "homepage": "https://github.com/pierralex2077/claude-diff#readme",
+  "homepage": "https://github.com/AlexLynx77/claude-diff#readme",
   "keywords": [
     "claude",
     "claude code",

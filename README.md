@@ -43,7 +43,7 @@ Everything stays on your machine; the extension makes no network request.
 
 ## Install
 
-1. Download `claude-diff-<version>.vsix` from the [latest release](https://github.com/pierralex2077/claude-diff/releases/latest) (or build it yourself: `npm run package`).
+1. Download `claude-diff-<version>.vsix` from the [latest release](https://github.com/AlexLynx77/claude-diff/releases/latest) (or build it yourself: `npm run package`).
 2. In the IDE (connected to WSL/SSH if you work there): Extensions → `...` → **Install from VSIX...** → the `.vsix`, then reload the window.
 
 To update, install the new `.vsix` the same way and reload the window.
