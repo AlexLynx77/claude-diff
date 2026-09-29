@@ -1238,11 +1238,13 @@ async function activate(context) {
     // Files written by git (checkout, pull, merge...) are never Claude's changes.
     const g = await gitWatch.poll(folders);
     const now = Date.now();
-    for (const c of g.committed) recentCommits.set(c.top, { ...c, until: now + COMMIT_MEMORY_MS });
-    for (const [top, c] of recentCommits) if (c.until < now) recentCommits.delete(top);
+    // A commit does not touch the review, unless claudeDiff.clearReviewOnCommit says so.
+    const clearOnCommit = config().get('clearReviewOnCommit', false);
+    if (clearOnCommit) for (const c of g.committed) recentCommits.set(c.top, { ...c, until: now + COMMIT_MEMORY_MS });
+    for (const [top, c] of recentCommits) if (c.until < now || !clearOnCommit) recentCommits.delete(top);
     // A commit writes nothing in the working tree: no need to wait for git to be done. A change
     // noticed only after the commit that holds it (edit and commit in the same breath) is checked too.
-    if (g.committed.length || (held.size && recentCommits.size)) {
+    if (clearOnCommit && (g.committed.length || (held.size && recentCommits.size))) {
       const kept = await keepCommitted(g.committed.length ? g.committed : [...recentCommits.values()], held, g.committed.length > 0);
       if (kept) {
         log.info(`committed: ${plural(kept, 'file')} kept`);

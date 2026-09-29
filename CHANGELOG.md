@@ -2,8 +2,9 @@
 
 ## 0.8.8
 
-- Fix: files that git ignores (build output such as `public/`, screenshots, temporary scripts...) stayed "to review" after a commit, since a commit can never hold them. A commit now clears them too. Files that look like secrets (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`) still stay to review.
-- End-to-end test for an ignored file and a secret around a commit.
+- A `git commit` no longer takes files out of the review by default: a commit is not a review, and Claude may commit by itself. The behaviour of 0.8.6 and 0.8.7 is now the setting `claudeDiff.clearReviewOnCommit` (default `false`).
+- With that setting on: files that git ignores (build output such as `public/`, screenshots...) are cleared by a commit too, since a commit can never hold them; secret-looking files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`) still stay to review.
+- End-to-end tests: a commit leaves the review alone by default; with the setting on, an ignored file and a secret around a commit.
 
 ## 0.8.7
 

@@ -63,6 +63,11 @@
           "default": false,
           "markdownDescription": "Automatically open a file (without taking focus) the first time Claude changes it, so you can review it inline."
         },
+        "claudeDiff.clearReviewOnCommit": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "When you `git commit`, take out of the review the files that are exactly what the commit holds, and the files git ignores (build output, screenshots...). Files that look like secrets (`.env`...) stay. Off by default: a commit is not a review, and Claude may commit by itself."
+        },
         "claudeDiff.exclude": {
           "type": "array",
           "items": {

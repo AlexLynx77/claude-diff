@@ -242,7 +242,22 @@ async function gitScenarios({ ws, api, put, read, entry, beat }) {
   await sleep(1500);
   check('git: nothing is left to review at the end', api._entries().length === 0, names());
 
-  // A commit keeps what it holds; what is not committed yet stays to review
+  // By default a commit does not touch the review: it is not a review, and Claude may commit by itself
+  put('b.js', 'default();\n');
+  const waiting = await until(() => {
+    beat();
+    return entry('b.js');
+  }, 30000);
+  check('git: a change is pending before a commit made with the default setting', !!waiting, names());
+  git(ws, 'commit', '-q', '-a', '-m', 'default setting');
+  await settle(4000);
+  check('git: by default a commit leaves the review alone', !!entry('b.js'), names());
+  await vscode.commands.executeCommand('claudeDiff.keepAll');
+  await sleep(1500);
+  await vscode.workspace.getConfiguration('claudeDiff').update('clearReviewOnCommit', true, vscode.ConfigurationTarget.Global);
+  await sleep(500);
+
+  // With claudeDiff.clearReviewOnCommit, a commit keeps what it holds; what is not committed yet stays to review
   put('b.js', 'committed();\n');
   put('c.py', 'def f():\n    return 3\n');
   put('.gitignore', '.env\n');
