@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.8
+
+- Fix: files that git ignores (build output such as `public/`, screenshots, temporary scripts...) stayed "to review" after a commit, since a commit can never hold them. A commit now clears them too. Files that look like secrets (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`) still stay to review.
+- End-to-end test for an ignored file and a secret around a commit.
+
 ## 0.8.7
 
 - Fix: a change committed right after being made stayed "to review". When Claude edits a file and commits in the same breath, the extension noticed the edit only after the commit, and nothing compared it with that commit anymore. A change noticed within a minute of a commit is now checked against it, like the files already waiting.

@@ -2,7 +2,7 @@
   "name": "claude-diff",
   "displayName": "Claude Diff",
   "description": "Unofficial companion for Claude Code: see, keep or undo the file changes Claude makes, right in the editor. Nothing to install or configure.",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "publisher": "local",
   "author": "AlexLynx77",
   "license": "MIT",

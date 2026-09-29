@@ -6,7 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { splitLines, detectEol, diffLines, planReplace } = require('./diff');
 const { Activity, Tracker, norm } = require('./tracker');
-const { GitWatch, show } = require('./git');
+const { GitWatch, git, show } = require('./git');
 
 const SCHEME = 'claude-diff';
 /** Read-only review view of a file: old lines shown (greyed) right above the new ones. */
@@ -614,8 +614,26 @@ async function rebasePending(ops) {
   }
 }
 
+/** Looks like a secret: a git-ignored file of this kind stays to review, even after a commit. */
+const SECRET_FILE = /(^|\/)\.env(\.[^/]*)?$|\.(pem|key|p12|pfx)$/i;
+
+/**
+ * Is `file` done with as far as a commit goes? Either it is exactly what commit `op.rev` holds (a
+ * deletion included), or git ignores it (build output, screenshots...): it can never be committed,
+ * so nothing would ever take it out of the review. Secrets such as `.env` are the exception.
+ * `ignoredToo` is false when the commit is not new: a git-ignored file changed after it is just Claude working.
+ */
+async function isCommitted(op, file, ignoredToo) {
+  if (await isHeldByCommit(op, file)) return true;
+  if (!ignoredToo) return false;
+  const rel = path.relative(op.top, file);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false;
+  const relPath = rel.split(path.sep).join('/');
+  return !SECRET_FILE.test(relPath) && (await git(op.top, ['check-ignore', '-q', '--', relPath])) !== null; // exit 0: ignored
+}
+
 /** Is `file` exactly what commit `op.rev` holds (a deletion included)? */
-async function isCommitted(op, file) {
+async function isHeldByCommit(op, file) {
   const rel = path.relative(op.top, file);
   if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false;
   const relPath = rel.split(path.sep).join('/');
@@ -643,7 +661,7 @@ async function keepCommitted(ops, held, snapshotsToo = true) {
   for (const op of ops) {
     for (const [key, snaps] of [...byFile]) {
       try {
-        if (!(await isCommitted(op, snaps[0].file))) continue;
+        if (!(await isCommitted(op, snaps[0].file, snapshotsToo))) continue;
         await discard(snaps.map((s) => s.path));
         byFile.delete(key);
         kept++;
@@ -652,7 +670,7 @@ async function keepCommitted(ops, held, snapshotsToo = true) {
       }
     }
     for (const [key, h] of [...held]) {
-      if (!(await isCommitted(op, h.file))) continue;
+      if (!(await isCommitted(op, h.file, snapshotsToo))) continue;
       held.delete(key);
       kept++;
     }
