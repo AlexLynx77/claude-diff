@@ -40,6 +40,7 @@ Everything stays on your machine; the extension makes no network request.
 - `claudeDiff.reviewPlainTextLanguages` (default `json`, `jsonc`, `css`, `scss`, `less`): languages whose review view is plain text. VS Code's JSON and CSS servers validate every document, including the review view where old and new lines are mixed, and would report syntax errors that are not in the real file. Remove a language from the list to get its highlighting back.
 - `claudeDiff.showExplorerDot` (default `true`).
 - `claudeDiff.autoOpen` (default `false`): open a file (without stealing focus) the first time Claude changes it.
+- `claudeDiff.clearReviewOnCommit` (default `false`): by default a `git commit` does not change the review: a commit is not a review, and Claude may commit by itself. Turn it on to have a commit take out of the review the files it holds exactly (modified, created or deleted) and the files git ignores; secret-looking files (`.env*`, `*.pem`, `*.key`...) always stay. Switching branch never counts as Claude's changes either way.
 
 ## Install
 

@@ -2,7 +2,7 @@
   "name": "claude-diff",
   "displayName": "Claude Diff",
   "description": "Unofficial companion for Claude Code: see, keep or undo the file changes Claude makes, right in the editor. Nothing to install or configure.",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "publisher": "local",
   "author": "AlexLynx77",
   "license": "MIT",
@@ -62,6 +62,11 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Automatically open a file (without taking focus) the first time Claude changes it, so you can review it inline."
+        },
+        "claudeDiff.clearReviewOnCommit": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "When you `git commit`, take out of the review the files that are exactly what the commit holds, and the files git ignores (build output, screenshots...). Files that look like secrets (`.env`...) stay. Off by default: a commit is not a review, and Claude may commit by itself."
         },
         "claudeDiff.exclude": {
           "type": "array",

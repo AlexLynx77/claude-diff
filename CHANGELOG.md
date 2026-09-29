@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.8
+
+- A `git commit` no longer takes files out of the review by default: a commit is not a review, and Claude may commit by itself. The behaviour of 0.8.6 and 0.8.7 is now the setting `claudeDiff.clearReviewOnCommit` (default `false`).
+- With that setting on: files that git ignores (build output such as `public/`, screenshots...) are cleared by a commit too, since a commit can never hold them; secret-looking files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`) still stay to review.
+- End-to-end tests: a commit leaves the review alone by default; with the setting on, an ignored file and a secret around a commit.
+
 ## 0.8.7
 
 - Fix: a change committed right after being made stayed "to review". When Claude edits a file and commits in the same breath, the extension noticed the edit only after the commit, and nothing compared it with that commit anymore. A change noticed within a minute of a commit is now checked against it, like the files already waiting.
