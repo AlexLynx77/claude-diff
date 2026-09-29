@@ -241,6 +241,42 @@ async function gitScenarios({ ws, api, put, read, entry, beat }) {
   await vscode.commands.executeCommand('claudeDiff.keepAll');
   await sleep(1500);
   check('git: nothing is left to review at the end', api._entries().length === 0, names());
+
+  // A commit keeps what it holds; what is not committed yet stays to review
+  put('b.js', 'committed();\n');
+  put('c.py', 'def f():\n    return 3\n');
+  put('.gitignore', '.env\n');
+  put('.env', 'SECRET=1\n');
+  const four = await until(() => {
+    beat();
+    return api._entries().length >= 4;
+  }, 30000);
+  check('git: four changes are pending before the commit', four, names());
+  git(ws, 'add', '.gitignore');
+  git(ws, 'commit', '-q', '-m', 'only some files', 'b.js', '.gitignore');
+  await settle(4000);
+  check(
+    'git: a commit keeps the files it holds, and only those',
+    !entry('b.js') && !entry('.gitignore') && !!entry('c.py') && !!entry('.env'),
+    names()
+  );
+  fs.unlinkSync(path.join(ws, 'd.css'));
+  const gone = await until(() => {
+    beat();
+    const d = entry('d.css');
+    return d && d.deleted;
+  }, 30000);
+  check('git: a deleted file is pending before the commit', gone, names());
+  git(ws, 'commit', '-q', '-a', '-m', 'the rest');
+  await settle(4000);
+  check(
+    'git: a commit keeps modified and deleted files, but not a git-ignored one it cannot hold',
+    !entry('c.py') && !entry('d.css') && api._entries().length === 1 && !!entry('.env'),
+    names()
+  );
+  await vscode.commands.executeCommand('claudeDiff.keepAll');
+  await sleep(1500);
+  check('git: nothing is left to review after the commits', api._entries().length === 0, names());
 }
 
 async function run() {
