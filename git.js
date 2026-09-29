@@ -142,6 +142,9 @@ class GitWatch {
             fresh.push({ top: repo.top, old: known ? from : null, new: to, files: known ? await this.changedFiles(repo, from, to) : null, rebase: known });
           }
         }
+        // First look at this repository: commits made while nobody was watching (window closed or
+        // reloaded) may hold files that are still waiting for review.
+        if (size !== undefined && repo.size === undefined) committed.push({ top: repo.top, rev: 'HEAD' });
         repo.size = size;
 
         // A merge stopped on conflicts: HEAD did not move, the working tree did.

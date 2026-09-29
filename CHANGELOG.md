@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.7
+
+- Fix: a change committed right after being made stayed "to review". When Claude edits a file and commits in the same breath, the extension noticed the edit only after the commit, and nothing compared it with that commit anymore. A change noticed within a minute of a commit is now checked against it, like the files already waiting.
+- Fix: a change committed while the window was closed or reloaded stayed "to review" forever. When a repository is first looked at, pending files that are exactly what HEAD holds are kept.
+- End-to-end test for an edit committed at once.
+
 ## 0.8.6
 
 - A `git commit` now keeps what it commits: a file waiting for review that is exactly what the commit holds (modified, created or deleted) is no longer to review. Files with anything not committed yet, and git-ignored files, stay. Before, a committed change stayed "to review", and after a checkout to another branch it could show that branch's differences as Claude's.
