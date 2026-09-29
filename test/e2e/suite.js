@@ -277,6 +277,24 @@ async function gitScenarios({ ws, api, put, read, entry, beat }) {
   await vscode.commands.executeCommand('claudeDiff.keepAll');
   await sleep(1500);
   check('git: nothing is left to review after the commits', api._entries().length === 0, names());
+
+  // Claude edits and commits in the same breath: the commit happens before the extension saw the edit
+  put('b.js', 'quick();\n');
+  put('h.txt', 'brand new\n');
+  git(ws, 'add', '-A');
+  git(ws, 'commit', '-q', '-m', 'edited and committed at once');
+  await settle(8000);
+  check('git: a change committed right after being made is not left to review', api._entries().length === 0, names());
+
+  // ... and a change made after that commit is still caught
+  put('b.js', 'quick();\nlater();\n');
+  const later = await until(() => {
+    beat();
+    return entry('b.js');
+  }, 30000);
+  check('git: a change made after the commit is still detected', later && later.hunks.length === 1, names());
+  await vscode.commands.executeCommand('claudeDiff.keepAll');
+  await sleep(1500);
 }
 
 async function run() {

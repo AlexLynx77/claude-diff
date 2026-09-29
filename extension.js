@@ -18,6 +18,8 @@ const IDLE_SCAN_MS = 15 * 1000;
 const LEGACY_HOOK_FILE = 'claude-diff-hook.js';
 /** In a git repository, a change waits this long before it is called Claude's: git may still be writing (see git.js). */
 const GIT_SETTLE_MS = 1500;
+/** A change can be noticed by a scan a while after the commit that holds it. */
+const COMMIT_MEMORY_MS = 60 * 1000;
 
 /**
  * @typedef {{aStart: number, aEnd: number, bStart: number, bEnd: number}} Hunk
@@ -632,10 +634,11 @@ async function isCommitted(op, file) {
 /**
  * A commit records the working tree in history: a pending file that is now exactly what the commit
  * holds is kept, like a reviewed change. Files with anything not committed yet stay to review.
- * `held` are the changes seen but not yet turned into snapshots. Returns how many files were kept.
+ * `held` are the changes seen but not yet turned into snapshots. With `snapshotsToo` false, only
+ * those are looked at (a change noticed after the commit that holds it). Returns how many files were kept.
  */
-async function keepCommitted(ops, held) {
-  const byFile = await readSnapshots(); // not `entries`: a snapshot may be newer than the last scan
+async function keepCommitted(ops, held, snapshotsToo = true) {
+  const byFile = snapshotsToo ? await readSnapshots() : new Map(); // not `entries`: a snapshot may be newer than the last scan
   let kept = 0;
   for (const op of ops) {
     for (const [key, snaps] of [...byFile]) {
@@ -1195,6 +1198,8 @@ async function activate(context) {
   const gitWatch = new GitWatch();
   /** Changes seen but not yet called Claude's: norm(path) -> {file, before, at}. */
   const held = new Map();
+  /** Repositories where a commit was seen lately: top -> {top, rev, until}. */
+  const recentCommits = new Map();
   const flushHeld = async (all = false) => {
     let flushed = 0;
     for (const [key, h] of [...held]) {
@@ -1214,9 +1219,13 @@ async function activate(context) {
     if (!folders.length) return;
     // Files written by git (checkout, pull, merge...) are never Claude's changes.
     const g = await gitWatch.poll(folders);
-    if (g.committed.length) {
-      // a commit writes nothing in the working tree: no need to wait for git to be done
-      const kept = await keepCommitted(g.committed, held);
+    const now = Date.now();
+    for (const c of g.committed) recentCommits.set(c.top, { ...c, until: now + COMMIT_MEMORY_MS });
+    for (const [top, c] of recentCommits) if (c.until < now) recentCommits.delete(top);
+    // A commit writes nothing in the working tree: no need to wait for git to be done. A change
+    // noticed only after the commit that holds it (edit and commit in the same breath) is checked too.
+    if (g.committed.length || (held.size && recentCommits.size)) {
+      const kept = await keepCommitted(g.committed.length ? g.committed : [...recentCommits.values()], held, g.committed.length > 0);
       if (kept) {
         log.info(`committed: ${plural(kept, 'file')} kept`);
         await refresh();
