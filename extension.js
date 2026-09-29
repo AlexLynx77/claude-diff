@@ -612,6 +612,51 @@ async function rebasePending(ops) {
   }
 }
 
+/** Is `file` exactly what commit `op.rev` holds (a deletion included)? */
+async function isCommitted(op, file) {
+  const rel = path.relative(op.top, file);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return false;
+  const relPath = rel.split(path.sep).join('/');
+  const head = await show(op.top, op.rev, relPath);
+  let disk = null;
+  try {
+    disk = await fs.promises.readFile(file, 'utf8');
+  } catch {
+    // file does not exist
+  }
+  if (disk !== null) return head !== null && sameText(stripBom(head), stripBom(disk));
+  // A deletion is committed only if the file was tracked before: a git-ignored file is absent from HEAD anyway.
+  return head === null && (await show(op.top, `${op.rev}~1`, relPath)) !== null;
+}
+
+/**
+ * A commit records the working tree in history: a pending file that is now exactly what the commit
+ * holds is kept, like a reviewed change. Files with anything not committed yet stay to review.
+ * `held` are the changes seen but not yet turned into snapshots. Returns how many files were kept.
+ */
+async function keepCommitted(ops, held) {
+  const byFile = await readSnapshots(); // not `entries`: a snapshot may be newer than the last scan
+  let kept = 0;
+  for (const op of ops) {
+    for (const [key, snaps] of [...byFile]) {
+      try {
+        if (!(await isCommitted(op, snaps[0].file))) continue;
+        await discard(snaps.map((s) => s.path));
+        byFile.delete(key);
+        kept++;
+      } catch {
+        // snapshot removed meanwhile: nothing left to keep
+      }
+    }
+    for (const [key, h] of [...held]) {
+      if (!(await isCommitted(op, h.file))) continue;
+      held.delete(key);
+      kept++;
+    }
+  }
+  return kept;
+}
+
 /** Accept one hunk: fold it into the baseline. */
 async function keepHunk(fileArg, sig) {
   const [entry, hunk] = findHunk(fileArg, sig);
@@ -1169,6 +1214,14 @@ async function activate(context) {
     if (!folders.length) return;
     // Files written by git (checkout, pull, merge...) are never Claude's changes.
     const g = await gitWatch.poll(folders);
+    if (g.committed.length) {
+      // a commit writes nothing in the working tree: no need to wait for git to be done
+      const kept = await keepCommitted(g.committed, held);
+      if (kept) {
+        log.info(`committed: ${plural(kept, 'file')} kept`);
+        await refresh();
+      }
+    }
     if (g.busy) return; // git is writing the working tree: look again once it is done
     if (g.fresh.length) {
       for (const op of g.fresh) {

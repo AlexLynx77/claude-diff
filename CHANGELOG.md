@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.6
+
+- A `git commit` now keeps what it commits: a file waiting for review that is exactly what the commit holds (modified, created or deleted) is no longer to review. Files with anything not committed yet, and git-ignored files, stay. Before, a committed change stayed "to review", and after a checkout to another branch it could show that branch's differences as Claude's.
+- End-to-end tests for partial commits, `commit -a` and deleted files.
+
 ## 0.8.5
 
 - Fix: changes you had already kept came back "to review" after a `git checkout`, `merge`, `pull`, `rebase` or `reset`. Claude is considered active for 2 minutes after its last message, and every file that changed in that time was assumed to be Claude's, including the files git itself rewrote when you switched branch. Claude Diff now recognises git's own writes (through the HEAD reflog, `MERGE_HEAD` and git's lock files) and never counts them as Claude's changes. A plain `git commit` is not affected, and Claude's own edits, even on a file git has just written, are still detected.

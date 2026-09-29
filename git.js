@@ -109,11 +109,13 @@ class GitWatch {
 
   /**
    * Looks for git operations since the last call.
-   * @returns {Promise<{busy: boolean, fresh: {top: string, old: string | null, new: string | null, files: Set<string> | null, rebase: boolean}[]}>}
-   *   busy: git is writing the working tree right now; fresh: operations that just finished.
+   * @returns {Promise<{busy: boolean, fresh: {top: string, old: string | null, new: string | null, files: Set<string> | null, rebase: boolean}[], committed: {top: string, rev: string}[]}>}
+   *   busy: git is writing the working tree right now; fresh: operations that just finished;
+   *   committed: repositories where a commit was just made, and HEAD after it.
    */
   async poll(folders) {
     const fresh = [];
+    const committed = [];
     let busy = false;
     try {
       await this.resolve(folders);
@@ -132,6 +134,7 @@ class GitWatch {
             .map((m) => ({ old: m[1], new: m[2], msg: m[3] }));
           // a commit only records the files, it never writes them
           const writes = lines.filter((l) => !/^commit\b/.test(l.msg));
+          if (writes.length < lines.length) committed.push({ top: repo.top, rev: lines[lines.length - 1].new });
           if (writes.length) {
             const from = writes[0].old;
             const to = writes[writes.length - 1].new;
@@ -162,7 +165,7 @@ class GitWatch {
       if (op.files) for (const f of op.files) this.written.set(f, now + FILES_TTL);
       else this.allUntil = now + ALL_TTL;
     }
-    return { busy, fresh };
+    return { busy, fresh, committed };
   }
 
   /** True (once) when git wrote this file since the last scan saw it. */
