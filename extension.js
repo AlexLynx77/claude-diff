@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
-const { splitLines, detectEol, diffLines, planReplace } = require('./diff');
+const { splitLines, detectEol, diffLines, planReplace, foldHunk, sigOf, hunkIds, matchHunk } = require('./diff');
 const { Activity, Tracker, norm } = require('./tracker');
 const { GitWatch, git, show } = require('./git');
 
@@ -30,7 +30,6 @@ const COMMIT_MEMORY_MS = 60 * 1000;
  * }} Entry
  */
 
-const sigOf = (h) => `${h.aStart}:${h.aEnd}:${h.bStart}:${h.bEnd}`;
 const stripBom = (s) => (s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
 const sameText = (a, b) => a.replace(/\r\n|\r/g, '\n') === b.replace(/\r\n|\r/g, '\n');
 const hashOf = (s) => crypto.createHash('md5').update(s).digest('hex');
@@ -56,12 +55,20 @@ let entries = new Map();
 /** Every file that has a snapshot (pending review). */
 let trackedFiles = new Set();
 let trackedPaths = [];
-/** Parsed snapshots, keyed by snapshot path. */
+/** Parsed snapshots, keyed by snapshot path: {stamp, snap}. A rewritten snapshot keeps its path, hence the stamp. */
 const snapCache = new Map();
 /** Where snapshots are stored (per workspace, outside the project). */
 let storeDir = '';
 /** Re-scans and re-renders everything; assigned in activate(). @type {() => Promise<void>} */
 let refresh = async () => {};
+/**
+ * Runs a user action (keep, undo...) after everything already queued, on a fresh scan: a click made
+ * before the previous one was redrawn must see its result. Assigned in activate().
+ * @type {<T>(fn: () => Promise<T>) => Promise<T>}
+ */
+let exclusive = (fn) => fn();
+/** Re-scans and re-renders now; only for code already running inside exclusive(). */
+let refreshNow = async () => {};
 /** Updates the review bar; assigned in activate(). */
 let showRestore = () => {};
 /** @type {Tracker} */
@@ -101,13 +108,22 @@ async function readSnapshots() {
     for (const name of names) {
       if (!name.endsWith('.json')) continue;
       const p = path.join(dir, name);
+      // Stamp first, content second: a snapshot replaced in between is then read again next time.
+      let stamp;
+      try {
+        const st = await fs.promises.stat(p);
+        stamp = `${st.mtimeMs}:${st.size}:${st.ino}`;
+      } catch {
+        continue; // removed meanwhile
+      }
       alive.add(p);
-      let snap = snapCache.get(p);
+      const cached = snapCache.get(p);
+      let snap = cached && cached.stamp === stamp ? cached.snap : null;
       if (!snap) {
         try {
           snap = JSON.parse(await fs.promises.readFile(p, 'utf8'));
           snap.path = p;
-          snapCache.set(p, snap);
+          snapCache.set(p, { stamp, snap });
         } catch {
           continue; // half-written or corrupt snapshot
         }
@@ -260,16 +276,28 @@ function liveEntry(doc) {
 
 /** Accepts an entry, a file path, a Uri (editor title menu) or nothing (active editor). */
 function entryFromArg(arg) {
-  if (arg && typeof arg === 'object' && 'hunks' in arg && 'file' in arg) return arg;
+  if (arg && typeof arg === 'object' && 'hunks' in arg && 'file' in arg) return entries.get(norm(arg.file));
   if (typeof arg === 'string') return entries.get(norm(arg));
   if (arg instanceof vscode.Uri) return entryForUri(arg);
   const ed = vscode.window.activeTextEditor;
   return ed && entryForUri(ed.document.uri);
 }
 
-function findHunk(fileArg, sig) {
+/** Ids of an entry's hunks (what each says, see hunkIds), computed once per entry. */
+const idsCache = new WeakMap();
+function idsOf(entry) {
+  let ids = idsCache.get(entry);
+  if (!ids) {
+    ids = hunkIds(entry.baseline, entry.text, entry.hunks);
+    idsCache.set(entry, ids);
+  }
+  return ids;
+}
+
+/** The change a Keep / Undo button was drawn for, in the entry as it is now (see matchHunk). */
+function findHunk(fileArg, sig, id) {
   const entry = entryFromArg(fileArg);
-  const hunk = entry && entry.hunks.find((h) => sigOf(h) === sig);
+  const hunk = entry && matchHunk(entry.hunks, id ? idsOf(entry) : [], sig, id);
   return [entry, hunk];
 }
 
@@ -520,11 +548,17 @@ async function undoFiles(list) {
 }
 
 /** Puts back what the last undo removed: Claude's version of the files, still pending review. */
-async function restoreLastUndo() {
-  const undo = lastUndo;
-  if (!undo) return;
-  lastUndo = null;
-  showRestore(0);
+const restoreLastUndo = () =>
+  exclusive(async () => {
+    const undo = lastUndo;
+    if (!undo) return;
+    lastUndo = null;
+    showRestore(0);
+    await putBack(undo);
+    await refreshNow();
+  });
+
+async function putBack(undo) {
   for (const f of undo.files) {
     const uri = vscode.Uri.file(f.file);
     tracker.expect(f.file, f.content);
@@ -544,7 +578,6 @@ async function restoreLastUndo() {
       await fs.promises.writeFile(s.path, s.raw);
     }
   }
-  await refresh();
 }
 
 async function keepEntries(list) {
@@ -553,7 +586,9 @@ async function keepEntries(list) {
 }
 
 /** Keeps or undoes one file; when it was the file on screen, moves on to the next one. */
-async function fileAction(arg, verb) {
+const fileAction = (arg, verb) => exclusive(() => applyFileAction(arg, verb));
+
+async function applyFileAction(arg, verb) {
   const entry = entryFromArg(arg);
   if (!entry) return;
   const ed = vscode.window.activeTextEditor;
@@ -565,19 +600,20 @@ async function fileAction(arg, verb) {
 
   if (verb === 'undo') await undoFiles([entry]);
   else await keepEntries([entry]);
-  await refresh();
+  await refreshNow();
   const target = following && entries.get(norm(following.file));
   if (wasActive && target) await openFile(target);
 }
 
-async function bulkAction(verb) {
-  const list = ordered();
-  if (!list.length) return;
-  // No confirmation dialog: an undo can be reverted with "Restore".
-  if (verb === 'undo') await undoFiles(list);
-  else await keepEntries(list);
-  await refresh();
-}
+const bulkAction = (verb) =>
+  exclusive(async () => {
+    const list = ordered();
+    if (!list.length) return;
+    // No confirmation dialog: an undo can be reverted with "Restore".
+    if (verb === 'undo') await undoFiles(list);
+    else await keepEntries(list);
+    await refreshNow();
+  });
 
 async function writeBaseline(entry, content) {
   const [first, ...rest] = entry.snapshots;
@@ -678,40 +714,49 @@ async function keepCommitted(ops, held, snapshotsToo = true) {
   return kept;
 }
 
+const changeGone = () =>
+  vscode.window.setStatusBarMessage('$(info) Claude Diff: that change was already handled or has changed, nothing done', 4000);
+
 /** Accept one hunk: fold it into the baseline. */
-async function keepHunk(fileArg, sig) {
-  const [entry, hunk] = findHunk(fileArg, sig);
-  if (!entry || !hunk) return refresh();
-  if (entry.isNew || entry.deleted) return fileAction(entry, 'keep');
-  const base = splitLines(entry.baseline);
-  base.splice(hunk.aStart, hunk.aEnd - hunk.aStart, ...splitLines(entry.text).slice(hunk.bStart, hunk.bEnd));
-  await writeBaseline(entry, (entry.bom ? '﻿' : '') + base.join(detectEol(entry.baseline)));
-  await refresh();
-}
+const keepHunk = (fileArg, sig, id) =>
+  exclusive(async () => {
+    const [entry, hunk] = findHunk(fileArg, sig, id);
+    if (!entry || !hunk) {
+      if (entry) changeGone();
+      return refreshNow();
+    }
+    if (entry.isNew || entry.deleted) return applyFileAction(entry, 'keep');
+    await writeBaseline(entry, (entry.bom ? '\ufeff' : '') + foldHunk(entry.baseline, entry.text, hunk));
+    await refreshNow();
+  });
 
 /** Reject one hunk: put the original lines back into the document. */
-async function undoHunk(fileArg, sig) {
-  const [entry, hunk] = findHunk(fileArg, sig);
-  if (!entry || !hunk) return refresh();
-  if (entry.isNew || entry.deleted) return fileAction(entry, 'undo');
+const undoHunk = (fileArg, sig, id) =>
+  exclusive(async () => {
+    const [entry, hunk] = findHunk(fileArg, sig, id);
+    if (!entry || !hunk) {
+      if (entry) changeGone();
+      return refreshNow();
+    }
+    if (entry.isNew || entry.deleted) return applyFileAction(entry, 'undo');
 
-  const uri = vscode.Uri.file(entry.file);
-  const doc = await vscode.workspace.openTextDocument(uri);
-  if (doc.getText() !== entry.text) {
-    vscode.window.setStatusBarMessage('$(warning) Claude Diff: the file changed, review it again', 4000);
-    return refresh();
-  }
-  const eol = doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
-  const original = splitLines(entry.baseline).slice(hunk.aStart, hunk.aEnd);
-  const p = planReplace(splitLines(entry.text), hunk.bStart, hunk.bEnd, original, eol);
-  const edit = new vscode.WorkspaceEdit();
-  edit.replace(uri, new vscode.Range(p.sl, p.sc, p.el, p.ec), p.text);
-  await vscode.workspace.applyEdit(edit);
-  tracker.expect(entry.file, doc.getText());
-  await doc.save();
-  await tracker.refresh(entry.file);
-  await refresh();
-}
+    const uri = vscode.Uri.file(entry.file);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    if (doc.getText() !== entry.text) {
+      vscode.window.setStatusBarMessage('$(warning) Claude Diff: the file changed, review it again', 4000);
+      return refreshNow();
+    }
+    const eol = doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+    const original = splitLines(entry.baseline).slice(hunk.aStart, hunk.aEnd);
+    const p = planReplace(splitLines(entry.text), hunk.bStart, hunk.bEnd, original, eol);
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(uri, new vscode.Range(p.sl, p.sc, p.el, p.ec), p.text);
+    await vscode.workspace.applyEdit(edit);
+    tracker.expect(entry.file, doc.getText());
+    await doc.save();
+    await tracker.refresh(entry.file);
+    await refreshNow();
+  });
 
 // ---------------------------------------------------------------- legacy cleanup (<= 0.5 used a hook)
 
@@ -849,11 +894,12 @@ class ReviewLenses {
       if (!b) return `${plural(a, 'line')} removed`;
       return `${plural(a, 'line')} → ${plural(b, 'line')}`;
     };
+    const ids = idsOf(entry);
     entry.hunks.forEach((h, k) => {
       const at = inReview ? model.hunkRows[k] : h.bStart;
       const line = Math.max(0, Math.min(at, doc.lineCount - 1));
       const r = new vscode.Range(line, 0, line, 0);
-      const args = [entry.file, sigOf(h)];
+      const args = [entry.file, sigOf(h), ids[k]];
       lenses.push(
         lens(r, '$(check) Keep', 'claudeDiff.keepHunk', args, 'Keep this change'),
         lens(r, '$(discard) Undo', 'claudeDiff.undoHunk', args, 'Put the old lines back'),
@@ -912,7 +958,8 @@ class RemovedHover {
     const entry = liveEntry(doc);
     if (!entry || entry.isNew) return undefined;
     const baseLines = splitLines(entry.baseline);
-    for (const h of entry.hunks) {
+    const ids = idsOf(entry);
+    for (const [k, h] of entry.hunks.entries()) {
       if (h.aEnd <= h.aStart) continue;
       const first = Math.min(h.bStart, doc.lineCount - 1);
       const last = Math.max(h.bEnd - 1, first);
@@ -921,7 +968,7 @@ class RemovedHover {
       const removed = baseLines.slice(h.aStart, h.aEnd);
       const shown = removed.slice(0, 40).map((l) => '- ' + l);
       if (removed.length > 40) shown.push(`… ${removed.length - 40} more line(s)`);
-      const args = encodeURIComponent(JSON.stringify([entry.file, sigOf(h)]));
+      const args = encodeURIComponent(JSON.stringify([entry.file, sigOf(h), ids[k]]));
       const md = new vscode.MarkdownString();
       md.isTrusted = { enabledCommands: ['claudeDiff.keepHunk', 'claudeDiff.undoHunk'] };
       md.appendMarkdown('**Removed or replaced by Claude**\n');
@@ -1207,9 +1254,18 @@ async function activate(context) {
   };
 
   let queue = Promise.resolve();
+  refreshNow = () => withTimeout(doRefresh(), 20000, 'refresh');
   refresh = () => {
-    queue = queue.then(() => withTimeout(doRefresh(), 20000, 'refresh')).catch((e) => log.error(String((e && e.stack) || e)));
+    queue = queue.then(refreshNow).catch((e) => log.error(String((e && e.stack) || e)));
     return queue;
+  };
+  exclusive = (fn) => {
+    const run = queue.then(async () => {
+      await withTimeout(scan(), 20000, 'scan before an action');
+      return withTimeout(fn(), 60000, 'an action');
+    });
+    queue = run.catch((e) => log.error(String((e && e.stack) || e)));
+    return run;
   };
 
   // ---- change detection: Claude activity + workspace scan
@@ -1338,8 +1394,8 @@ async function activate(context) {
     },
     'claudeDiff.keepFile': (arg) => fileAction(arg, 'keep'),
     'claudeDiff.undoFile': (arg) => fileAction(arg, 'undo'),
-    'claudeDiff.keepHunk': (file, sig) => keepHunk(file, sig),
-    'claudeDiff.undoHunk': (file, sig) => undoHunk(file, sig),
+    'claudeDiff.keepHunk': (file, sig, id) => keepHunk(file, sig, id),
+    'claudeDiff.undoHunk': (file, sig, id) => undoHunk(file, sig, id),
     'claudeDiff.keepAll': () => bulkAction('keep'),
     'claudeDiff.undoAll': () => bulkAction('undo'),
     'claudeDiff.nextFile': () => goToFile(1),

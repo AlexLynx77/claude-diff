@@ -1,4 +1,5 @@
 'use strict';
+const crypto = require('crypto');
 
 /** Same line splitting as VS Code's text model. */
 const splitLines = (text) => text.split(/\r\n|\r|\n/);
@@ -90,4 +91,42 @@ function planReplace(lines, i, j, repl, eol) {
   return { sl: 0, sc: 0, el: n - 1, ec: lines[n - 1].length, text: repl.join(eol) };
 }
 
-module.exports = { splitLines, detectEol, diffLines, planReplace };
+/** The "before" text once `hunk` is accepted: its new lines replace the old ones in the baseline. */
+function foldHunk(baseline, text, hunk) {
+  const base = splitLines(baseline);
+  base.splice(hunk.aStart, hunk.aEnd - hunk.aStart, ...splitLines(text).slice(hunk.bStart, hunk.bEnd));
+  return base.join(detectEol(baseline));
+}
+
+const sigOf = (h) => `${h.aStart}:${h.aEnd}:${h.bStart}:${h.bEnd}`;
+
+/**
+ * Identity of each hunk by what it changes (its old and new lines), not by where it is: accepting or
+ * undoing another change moves every later hunk, but never alters what it says.
+ */
+function hunkIds(baseline, text, hunks) {
+  const a = baseline === null ? [] : splitLines(baseline);
+  const b = splitLines(text);
+  return hunks.map((h) =>
+    crypto.createHash('md5').update(JSON.stringify([a.slice(h.aStart, h.aEnd), b.slice(h.bStart, h.bEnd)])).digest('hex').slice(0, 12)
+  );
+}
+
+/**
+ * Finds again, among the current `hunks` (with their `ids`), the change a Keep / Undo button was
+ * drawn for, given the signature and id it was drawn with. The buttons can be a little older than
+ * the file (clicked right after another change was kept or undone): the coordinates may have moved,
+ * what the change says has not. Returns undefined when that change is gone or was altered.
+ */
+function matchHunk(hunks, ids, sig, id) {
+  if (!id) return hunks.find((h) => sigOf(h) === sig);
+  const same = hunks.filter((_, i) => ids[i] === id);
+  const exact = same.find((h) => sigOf(h) === sig);
+  if (exact || same.length <= 1) return exact || same[0];
+  // several identical changes: the one that is closest to where it was
+  const [aStart, , bStart] = sig.split(':').map(Number);
+  const gap = (h) => Math.min(Math.abs(h.aStart - aStart), Math.abs(h.bStart - bStart));
+  return same.reduce((best, h) => (gap(h) < gap(best) ? h : best));
+}
+
+module.exports = { splitLines, detectEol, diffLines, planReplace, foldHunk, sigOf, hunkIds, matchHunk };

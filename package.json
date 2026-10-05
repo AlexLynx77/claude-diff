@@ -2,7 +2,7 @@
   "name": "claude-diff",
   "displayName": "Claude Diff",
   "description": "Unofficial companion for Claude Code: see, keep or undo the file changes Claude makes, right in the editor. Nothing to install or configure.",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "publisher": "local",
   "author": "AlexLynx77",
   "license": "MIT",
@@ -22,8 +22,8 @@
     "ai"
   ],
   "scripts": {
-    "test": "node test/diff.fuzz.js && node test/e2e/run.js",
-    "test:unit": "node test/diff.fuzz.js",
+    "test": "node test/diff.fuzz.js && node test/hunks.fuzz.js && node test/e2e/run.js",
+    "test:unit": "node test/diff.fuzz.js && node test/hunks.fuzz.js",
     "test:e2e": "node test/e2e/run.js",
     "package": "npx @vscode/vsce package"
   },

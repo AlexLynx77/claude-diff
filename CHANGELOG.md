@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.9
+
+- Fix: a Keep on one block could be lost when clicked right after another (before the review had redrawn): the second click rebuilt the "before" from the old state and put the first block back "to review". Keep, Undo, Keep All, Undo All and Restore now run one after the other, each on a fresh scan, and never overwrite each other. The same went for Undo file right after a Keep on a block (it undid that block too).
+- Fix: a block kept while the extension was reading the file could stay "to review" until the window was reloaded (stale cache of the "before"). The cache now checks that the file did not change.
+- A Keep / Undo button now remembers what its change says, not only where it is. After another change is kept or undone and the lines move, it still acts on its own block; if Claude changed that block again since the button was drawn, nothing is kept or undone (a message says so) instead of accepting lines you were never shown.
+- Tests: `test/hunks.fuzz.js` (40 000 stale clicks, with and without duplicated lines) and end-to-end tests of fast Keep / Undo clicks in any order.
+
 ## 0.8.8
 
 - A `git commit` no longer takes files out of the review by default: a commit is not a review, and Claude may commit by itself. The behaviour of 0.8.6 and 0.8.7 is now the setting `claudeDiff.clearReviewOnCommit` (default `false`).
