@@ -9,6 +9,7 @@ const path = require('path');
 const vm = require('vm');
 const { execFileSync } = require('child_process');
 
+const { hunkIds } = require('../../diff');
 const pkg = require('../../package.json');
 const results = [];
 const check = (name, ok, detail = '') => results.push({ name, ok: !!ok, detail: ok ? '' : String(detail) });
@@ -31,6 +32,22 @@ const compiles = (src) => {
   }
 };
 
+/** r.txt as Claude leaves it after round k: three spots change each time (+1 line, -1 line, same size). */
+const round = (k) =>
+  [
+    'c1',
+    ...(k % 2 ? ['x' + k, 'y' + k] : ['x' + k]),
+    'c3',
+    'c4',
+    ...(k % 2 ? [] : ['z' + k]),
+    'c5',
+    'c6',
+    'c7',
+    'q' + k,
+    'c9',
+  ].join('\n') + '\n';
+const text = (...lines) => lines.join('\n') + '\n';
+
 const ORIGINAL = {
   'a.json': '{\n  "name": "x",\n  "version": 1,\n  "list": [1, 2, 3]\n}\n',
   'b.js': 'function add(a, b) {\n  const s = a + b;\n  return s;\n}\nmodule.exports = { add };\n',
@@ -39,6 +56,10 @@ const ORIGINAL = {
   'e.crlf.txt': 'one\r\ntwo\r\nthree\r\n',
   'f.bom.js': '\ufeffconst a = 1;\nconst b = 2;\n',
   'g.txt': 'keep me\nstay\n',
+  'r.txt': round(0),
+  'r2.txt': text('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'),
+  'r3.txt': text('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'),
+  'r4.txt': text('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'),
 };
 
 async function main() {
@@ -168,7 +189,88 @@ async function main() {
   check('undoing every change of d.css returns the exact original', !entry('d.css') && read('d.css') === ORIGINAL['d.css'], JSON.stringify(read('d.css')));
   check('nothing is left to review', api._entries().length === 0, JSON.stringify(api._entries().map((x) => path.basename(x.file))));
 
+  await fastClicks({ ws, api, put, read, entry, beat });
+
   if (process.env.E2E_GIT) await gitScenarios({ ws, api, put, read, entry, beat });
+}
+
+// Clicks made faster than the extension redraws its buttons (the later ones carry the coordinates of
+// a file that has since moved). Every click must act on its own change, and no earlier one may be lost.
+async function fastClicks({ api, put, read, entry, beat }) {
+  const pending = async (f, n) =>
+    until(() => {
+      beat();
+      const e = entry(f);
+      return e && e.hunks.length === n;
+    }, 30000);
+  /** The buttons of a file as the review draws them: [file, signature, id] for each change. */
+  const buttons = (f) => {
+    const e = entry(f);
+    const ids = hunkIds(e.baseline, e.text, e.hunks);
+    return e.hunks.map((h, i) => [e.file, sigOf(h), ids[i]]);
+  };
+  const keep = (b) => vscode.commands.executeCommand('claudeDiff.keepHunk', ...b);
+  const undo = (b) => vscode.commands.executeCommand('claudeDiff.undoHunk', ...b);
+  const resolved = (f) => until(() => !entry(f), 15000);
+
+  // 1. Keep, Keep, Keep without waiting: nothing may come back, in any order, with redraws in between
+  const orders = [[0, 1, 2], [2, 1, 0], [1, 0, 2], [2, 0, 1]];
+  for (let k = 1; k <= orders.length; k++) {
+    put('r.txt', round(k));
+    const ok = await pending('r.txt', 3);
+    if (!ok) {
+      check(`fast clicks, round ${k}: Claude's three changes are detected`, false, entry('r.txt') && JSON.stringify(entry('r.txt').hunks));
+      return;
+    }
+    const b = buttons('r.txt');
+    await Promise.all(orders[k - 1].flatMap((i) => [keep(b[i]), api._refresh()]));
+    const done = await resolved('r.txt');
+    check(
+      `fast clicks, round ${k}: keeping the three changes in a row (${orders[k - 1]}) leaves nothing to review`,
+      done && read('r.txt') === round(k),
+      entry('r.txt') ? `still pending: ${JSON.stringify(entry('r.txt').hunks)}` : JSON.stringify(read('r.txt'))
+    );
+  }
+
+  // 2. Keep, Undo, Keep on three changes of one file
+  put('r2.txt', text('p1', 'P2a', 'P2b', 'p3', 'p4', 'p6', 'p7', 'P8', 'p9'));
+  if (await pending('r2.txt', 3)) {
+    const b = buttons('r2.txt');
+    await Promise.all([keep(b[0]), undo(b[1]), keep(b[2])]);
+    const done = await resolved('r2.txt');
+    const want = text('p1', 'P2a', 'P2b', 'p3', 'p4', 'p5', 'p6', 'p7', 'P8', 'p9');
+    check('fast clicks: Keep, Undo, Keep in a row act each on its own change', done && read('r2.txt') === want, JSON.stringify(read('r2.txt')) + (entry('r2.txt') ? ' (still pending)' : ''));
+  } else check('fast clicks: three changes of r2.txt detected', false, JSON.stringify(entry('r2.txt') && entry('r2.txt').hunks));
+
+  // 3. Keep one change then Undo file at once: the change just kept stays
+  put('r3.txt', text('p1', 'P2a', 'P2b', 'p3', 'p4', 'p5', 'p6', 'p7', 'P8', 'p9'));
+  if (await pending('r3.txt', 2)) {
+    const b = buttons('r3.txt');
+    await Promise.all([keep(b[0]), vscode.commands.executeCommand('claudeDiff.undoFile', b[0][0])]);
+    const done = await resolved('r3.txt');
+    const want = text('p1', 'P2a', 'P2b', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9');
+    check('fast clicks: Undo file right after a Keep does not undo the change just kept', done && read('r3.txt') === want, JSON.stringify(read('r3.txt')));
+  } else check('fast clicks: two changes of r3.txt detected', false, JSON.stringify(entry('r3.txt') && entry('r3.txt').hunks));
+
+  // 4. A button drawn before Claude changed that very block again must not keep what it never showed
+  put('r4.txt', text('p1', 'A', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'));
+  if (await pending('r4.txt', 1)) {
+    const b = buttons('r4.txt');
+    put('r4.txt', text('p1', 'B', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'));
+    await until(() => {
+      beat();
+      return entry('r4.txt') && entry('r4.txt').text.includes('B');
+    }, 30000);
+    await keep(b[0]);
+    await sleep(1500);
+    const e = entry('r4.txt');
+    check('stale button: a block changed since it was drawn is not kept', e && e.baseline === ORIGINAL['r4.txt'] && e.hunks.length === 1, e ? JSON.stringify(e.baseline) : 'entry gone: B was kept unseen');
+    if (e) {
+      await vscode.commands.executeCommand('claudeDiff.undoFile', e.file);
+      await sleep(1500);
+    }
+  } else check('fast clicks: the change of r4.txt is detected', false, JSON.stringify(entry('r4.txt') && entry('r4.txt').hunks));
+  check('fast clicks: nothing is left to review', api._entries().length === 0, JSON.stringify(api._entries().map((x) => path.basename(x.file))));
 }
 
 // git rewrites files while Claude is "active": that must never bring reviewed changes back.
