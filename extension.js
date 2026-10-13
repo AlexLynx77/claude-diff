@@ -5,13 +5,15 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { splitLines, detectEol, diffLines, planReplace, foldHunk, sigOf, hunkIds, matchHunk } = require('./diff');
-const { Activity, Tracker, norm } = require('./tracker');
+const { Activity, Tracker, ANY, norm } = require('./tracker');
 const { GitWatch, git, show } = require('./git');
 
 const SCHEME = 'claude-diff';
 /** Read-only review view of a file: old lines shown (greyed) right above the new ones. */
 const REVIEW = 'claude-review';
 /** Claude is considered active in a folder for this long after its last transcript write. */
+/** How long what was typed in an untitled buffer is remembered, to recognise it once saved. */
+const UNTITLED_MEMORY_MS = 10 * 60 * 1000;
 const ACTIVE_MS = Number(process.env.CLAUDE_DIFF_ACTIVE_MS) || 2 * 60 * 1000;
 /** Workspace scan period while Claude is not working (keeps the "before" contents current). */
 const IDLE_SCAN_MS = 15 * 1000;
@@ -993,9 +995,26 @@ async function activate(context) {
   log.info(`activated (workspace: ${folderPaths().join(', ') || 'none'}, store: ${storeDir})`);
 
   const config = () => vscode.workspace.getConfiguration('claudeDiff');
+  // What the user typed in untitled buffers: saved under a name, it appears on disk as a new file.
+  /** @type {Map<string, {text: string, at: number}>} */
+  const untitledTexts = new Map();
+  const flat = (s) => stripBom(s).replace(/\r\n/g, '\n');
+  const isUserText = (content) => {
+    const want = flat(content);
+    const now = Date.now();
+    for (const [k, u] of untitledTexts) {
+      if (now - u.at > UNTITLED_MEMORY_MS) untitledTexts.delete(k);
+      else if (flat(u.text) === want) {
+        untitledTexts.delete(k);
+        return true;
+      }
+    }
+    return false;
+  };
   tracker = new Tracker({
     exclude: () => config().get('exclude', []),
     skip: (p) => norm(p).endsWith(norm(path.join('.claude', 'claude-diff'))),
+    isUserText,
   });
   const activity = new Activity();
 
@@ -1460,7 +1479,15 @@ async function activate(context) {
       tracker.ready = false;
       schedule();
     }),
+    // A file created from VS Code (explorer, an extension) is the user's, not Claude's.
+    vscode.workspace.onDidCreateFiles((e) => {
+      for (const uri of e.files) if (uri.scheme === 'file') tracker.expect(uri.fsPath, ANY);
+    }),
     vscode.workspace.onDidChangeTextDocument((e) => {
+      if (e.document.uri.scheme === 'untitled') {
+        untitledTexts.set(e.document.uri.toString(), { text: e.document.getText(), at: Date.now() });
+        return;
+      }
       if (e.document.uri.scheme === REVIEW) {
         vscode.window.visibleTextEditors.filter((ed) => ed.document === e.document).forEach(decorate);
         return;
