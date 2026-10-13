@@ -433,6 +433,48 @@ async function gitScenarios({ ws, api, put, read, entry, beat }) {
   );
   await vscode.commands.executeCommand('claudeDiff.keepAll');
   await sleep(1500);
+  // ---- files created by the user (while Claude is working) are never Claude's changes
+  const HEADER = '/*\n * File: header.js\n * Author: me\n */\n';
+  const ghost = () => api._entries().filter((e) => /^user-/.test(path.basename(e.file))).map((e) => path.basename(e.file));
+  const watch = async (ms) => {
+    const start = Date.now();
+    while (Date.now() - start < ms) {
+      beat();
+      await sleep(500);
+    }
+  };
+
+  // Ctrl+N, a header inserted by another extension (Ctrl+Shift+H), then Save As
+  const untitled = await vscode.workspace.openTextDocument(vscode.Uri.parse('untitled:' + path.join(ws, 'user-untitled.js')));
+  const ed1 = await vscode.window.showTextDocument(untitled);
+  await ed1.edit((b) => b.insert(new vscode.Position(0, 0), HEADER + 'const a = 1;\n'));
+  await untitled.save();
+  await watch(5000);
+  check('user: an untitled file saved with a header is not Claude\'s', fs.existsSync(path.join(ws, 'user-untitled.js')) && !ghost().includes('user-untitled.js'), ghost());
+
+  // New file from the explorer (empty on disk), then the header is inserted and saved
+  const target = vscode.Uri.file(path.join(ws, 'user-explorer.js'));
+  const we = new vscode.WorkspaceEdit();
+  we.createFile(target, { ignoreIfExists: true });
+  await vscode.workspace.applyEdit(we);
+  const doc2 = await vscode.workspace.openTextDocument(target);
+  const ed2 = await vscode.window.showTextDocument(doc2);
+  await watch(2500);
+  await ed2.edit((b) => b.insert(new vscode.Position(0, 0), HEADER));
+  await doc2.save();
+  await watch(5000);
+  check('user: a file created from the explorer, then given a header, is not Claude\'s', fs.existsSync(target.fsPath) && !ghost().includes('user-explorer.js'), ghost());
+
+  // ... while a file Claude creates meanwhile is still detected
+  put('user-claude.js', 'console.log("claude");\n');
+  const still = await until(() => {
+    beat();
+    return entry('user-claude.js');
+  }, 30000);
+  check('user: a file created by Claude is still detected', still && still.isNew, ghost());
+  await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  await vscode.commands.executeCommand('claudeDiff.keepAll');
+  await sleep(1500);
 }
 
 async function run() {

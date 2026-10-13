@@ -12,6 +12,9 @@ const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_FILES = 20000;
 const MAX_CACHE_CHARS = 200e6;
 
+/** `expect(file, ANY)`: whatever content is seen next is the user's (a file created from the explorer). */
+const ANY = Symbol('any');
+
 const ci = process.platform === 'win32';
 const norm = (p) => (ci ? p.toLowerCase() : p);
 const encode = (p) => p.replace(/[^a-zA-Z0-9]/g, '-');
@@ -71,7 +74,7 @@ class Activity {
 }
 
 class Tracker {
-  /** @param {{exclude: () => string[], skip: (p: string) => boolean}} opts */
+  /** @param {{exclude: () => string[], skip: (p: string) => boolean, isUserText?: (content: string) => boolean}} opts */
   constructor(opts) {
     this.opts = opts;
     /** norm(path) -> {path, mtime, size, content: string | undefined (not trackable)} */
@@ -97,6 +100,10 @@ class Tracker {
     if (e.until < Date.now()) {
       this.expected.delete(key);
       return false;
+    }
+    if (e.content === ANY) {
+      this.expected.delete(key);
+      return true;
     }
     const strip = (s) => (s && s.charCodeAt(0) === 0xfeff ? s.slice(1) : s);
     if (strip(e.content) !== strip(content)) return false;
@@ -193,7 +200,8 @@ class Tracker {
       const byGit = fromGit(key);
       if (attribute && this.ready && !byGit && !this.isExpected(key, content) && !isPending(key)) {
         if (!rec) {
-          if (content !== undefined) {
+          // A new file whose text is exactly what the user just typed in an untitled buffer is theirs.
+          if (content !== undefined && !(this.opts.isUserText && this.opts.isUserText(content))) {
             await onChange(st.path, null);
             changes++;
           }
@@ -223,4 +231,4 @@ class Tracker {
   }
 }
 
-module.exports = { Activity, Tracker, encode, norm };
+module.exports = { Activity, Tracker, ANY, encode, norm };

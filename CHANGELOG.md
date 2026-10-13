@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.10
+
+- Fix: a file you create yourself while Claude is working was taken for a file created by Claude (or a change of Claude). Two cases: a file created from the explorer or by an extension, and a new untitled file saved under a name (for example after an extension inserted a header with a shortcut). Both are now recognised as yours. A file Claude creates in the meantime is still detected.
+- End-to-end tests for both cases.
+
 ## 0.8.9
 
 - Fix: a Keep on one block could be lost when clicked right after another (before the review had redrawn): the second click rebuilt the "before" from the old state and put the first block back "to review". Keep, Undo, Keep All, Undo All and Restore now run one after the other, each on a fresh scan, and never overwrite each other. The same went for Undo file right after a Keep on a block (it undid that block too).
