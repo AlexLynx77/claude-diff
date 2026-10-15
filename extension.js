@@ -51,6 +51,13 @@ function withTimeout(promise, ms, label) {
 }
 const closeTab = (tab) => withTimeout(vscode.window.tabGroups.close(tab, true).then(undefined, () => {}), 3000, 'closing a tab');
 const plural = (n, word) => `${n} ${word}${n > 1 ? 's' : ''}`;
+/** Default shortcuts (package.json), for tooltips. */
+const mac = process.platform === 'darwin';
+const KEYS = {
+  keep: mac ? '⌘Y' : 'Ctrl+Y',
+  undo: mac ? '⌘N' : 'Ctrl+N',
+  revert: mac ? '⌘Z' : 'Ctrl+Z',
+};
 
 /** Files with a pending change, keyed by norm(path). @type {Map<string, Entry>} */
 let entries = new Map();
@@ -71,8 +78,6 @@ let refresh = async () => {};
 let exclusive = (fn) => fn();
 /** Re-scans and re-renders now; only for code already running inside exclusive(). */
 let refreshNow = async () => {};
-/** Updates the review bar; assigned in activate(). */
-let showRestore = () => {};
 /** @type {Tracker} */
 let tracker;
 
@@ -327,7 +332,10 @@ function buildReview(entry) {
     for (; bi < h.bEnd; bi++) push(B[bi], 'new', k, bi);
   });
   for (; bi < B.length; bi++) push(B[bi], 'same', -1, bi);
-  return { text: lines.join('\n'), rows, hunkRows };
+  const ids = idsOf(entry);
+  // What each block's buttons act on (see findHunk), so that the cursor can name a block too.
+  const keys = entry.hunks.map((h, k) => [sigOf(h), ids[k]]);
+  return { text: lines.join('\n'), rows, hunkRows, keys };
 }
 
 function reviewUri(file) {
@@ -375,13 +383,15 @@ class ReviewProvider {
       return '';
     }
   }
-  /** Updates the open review documents whose content changed. */
+  /**
+   * Updates the open review documents whose content changed. Their model is rebuilt even when the
+   * text is the same: an undone deletion turns an old (greyed) line into the very same plain line.
+   */
   refresh() {
     for (const doc of vscode.workspace.textDocuments) {
       if (doc.uri.scheme !== REVIEW) continue;
-      const entry = entries.get(norm(fileOfReview(doc.uri)));
-      const next = entry ? buildReview(entry).text : null;
-      if (next === null || next !== doc.getText()) this._emitter.fire(doc.uri);
+      const model = reviewModel(fileOfReview(doc.uri));
+      if (!model || model.text !== doc.getText()) this._emitter.fire(doc.uri);
     }
   }
 }
@@ -411,19 +421,101 @@ const reviewEnabled = () => vscode.workspace.getConfiguration('claudeDiff').get(
 const editing = new Set();
 
 /** Opens a changed file: in the review view (old lines above new ones), or the file itself. */
-async function openFile(entry, preserveFocus = false, viewColumn) {
+async function openFile(entry, preserveFocus = false, viewColumn, at = 0) {
   const useReview = reviewEnabled() && !editing.has(norm(entry.file));
   if (!useReview && !entry.exists) return openDiff(entry);
   const uri = useReview ? reviewUri(entry.file) : vscode.Uri.file(entry.file);
   const doc = await vscode.workspace.openTextDocument(uri);
   const editor = await vscode.window.showTextDocument(doc, { preview: false, preserveFocus, viewColumn });
   const model = useReview ? reviewModels.get(norm(entry.file)) || reviewModel(entry.file) : null;
-  const line = model ? model.hunkRows[0] : entry.hunks[0] && entry.hunks[0].bStart;
-  if (line !== undefined) {
-    const pos = new vscode.Position(Math.max(0, Math.min(line, doc.lineCount - 1)), 0);
-    editor.selection = new vscode.Selection(pos, pos);
-    editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+  const starts = model ? model.hunkRows : entry.hunks.map((h) => h.bStart);
+  // `at`: index of the change to put the cursor on (-1: the last one)
+  const line = starts[at < 0 ? starts.length - 1 : Math.min(at, starts.length - 1)];
+  if (line !== undefined) placeCursor(editor, line);
+}
+
+function placeCursor(editor, line) {
+  const pos = new vscode.Position(Math.max(0, Math.min(line, editor.document.lineCount - 1)), 0);
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+}
+
+/**
+ * First line of each change, as shown in `editor` (review view or the file itself); null when the
+ * editor is not showing a file to review, or not its current content.
+ */
+function changeStarts(editor) {
+  const doc = editor.document;
+  if (doc.uri.scheme === REVIEW) {
+    const model = reviewModels.get(norm(fileOfReview(doc.uri)));
+    return model && model.text === doc.getText() && entryForUri(doc.uri) ? model.hunkRows : null;
   }
+  const entry = doc.uri.scheme === 'file' ? liveEntry(doc) : undefined;
+  return entry ? entry.hunks.map((h) => Math.min(h.bStart, doc.lineCount - 1)) : null;
+}
+
+/** The change under the cursor of `editor`, as [file, signature, id] (what its buttons carry). */
+function cursorChange(editor) {
+  if (!editor) return null;
+  const doc = editor.document;
+  const line = editor.selection.active.line;
+  if (doc.uri.scheme === REVIEW) {
+    const file = fileOfReview(doc.uri);
+    const model = reviewModels.get(norm(file));
+    if (!model || model.text !== doc.getText()) return null;
+    const row = model.rows[line];
+    return row && row.hunk >= 0 ? [file, ...model.keys[row.hunk]] : null;
+  }
+  const entry = doc.uri.scheme === 'file' ? liveEntry(doc) : undefined;
+  if (!entry) return null;
+  const ids = idsOf(entry);
+  for (const [k, h] of entry.hunks.entries()) {
+    const first = Math.min(h.bStart, doc.lineCount - 1);
+    const last = Math.max(h.bEnd - 1, first); // a pure deletion is marked on the line below it
+    if (line >= first && line <= last) return [entry.file, sigOf(h), ids[k]];
+  }
+  return null;
+}
+
+/** Moves to the next/previous change: in this file, then in the next/previous changed file. */
+async function goToChange(direction) {
+  const ed = vscode.window.activeTextEditor;
+  const starts = ed ? changeStarts(ed) : null;
+  if (starts && starts.length) {
+    const line = ed.selection.active.line;
+    const target = direction > 0 ? starts.find((s) => s > line) : [...starts].reverse().find((s) => s < line);
+    if (target !== undefined) return placeCursor(ed, target);
+  }
+  const list = ordered();
+  if (!list.length) {
+    vscode.window.setStatusBarMessage('$(check) Claude Diff: nothing left to review', 3000);
+    return;
+  }
+  const idx = list.findIndex((e) => norm(e.file) === activeKey());
+  if (idx >= 0 && list.length === 1 && starts && starts.length) {
+    return placeCursor(ed, direction > 0 ? starts[0] : starts[starts.length - 1]); // wrap around
+  }
+  const next = idx < 0 ? list[direction > 0 ? 0 : list.length - 1] : list[(idx + direction + list.length) % list.length];
+  await openFile(next, false, undefined, direction > 0 ? 0 : -1);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * After a Keep / Undo, puts the cursor on the change that took the place of the one just handled
+ * (the next one), when that file is on screen: pressing the same key again goes on with the review.
+ */
+async function focusChange(file, index) {
+  const ed = vscode.window.activeTextEditor;
+  const entry = entries.get(norm(file));
+  if (!ed || !entry || activeKey() !== norm(file)) return;
+  if (ed.document.uri.scheme === REVIEW) {
+    // The review view is redrawn by VS Code a moment later: wait for it, briefly.
+    const want = buildReview(entry).text;
+    for (let i = 0; i < 60 && ed.document.getText() !== want; i++) await sleep(50);
+  }
+  const starts = changeStarts(ed);
+  if (starts && starts.length) placeCursor(ed, starts[Math.min(index, starts.length - 1)]);
 }
 
 /** Opens the real file to edit it (from the review view). */
@@ -476,24 +568,45 @@ async function goToFile(direction) {
 }
 
 /**
- * What the last undo overwrote (Claude's version of each file + its snapshots), so that
- * "Restore" can put it back. Kept in memory until the next undo or window reload.
- * @type {{ files: {file: string, content: string | null, snaps: {path: string, raw: string}[]}[] } | null}
+ * The last Keep / Undo actions, newest last, so that they can be reverted (Ctrl+Z in the review,
+ * "Restore"). Each holds, per file, its content and snapshots from before the action and its content
+ * right after: an action is reverted only on files that did not change since. In memory only.
+ * @typedef {{file: string, content: string | null, after?: string | null, snaps: {path: string, raw: string}[]}} Backup
+ * @type {{verb: 'keep' | 'undo', files: Backup[], index?: number, at: number}[]}
  */
-let lastUndo = null;
+const history = [];
+const HISTORY_MAX = 20;
+/** Shows/hides what reverting needs (Restore button, Ctrl+Z); assigned in activate(). */
+let onHistory = () => {};
+
+/** The file's content as the editor sees it (unsaved edits included); null if it does not exist. */
+async function currentContent(file) {
+  const doc = openDocFor(file);
+  if (doc && doc.isDirty) return doc.getText();
+  try {
+    return await fs.promises.readFile(file, 'utf8');
+  } catch {
+    return null; // file does not exist (Claude deleted it)
+  }
+}
+
+const sameContent = (a, b) => (a === null || b === null ? a === b : sameText(stripBom(a), stripBom(b)));
+
+/** Runs `act` (a Keep / Undo on the files of `list`) and records it so that it can be reverted. */
+async function recorded(verb, list, act, index) {
+  const backups = [];
+  for (const entry of list) backups.push(await backupOf(entry));
+  const done = await act();
+  const files = backups.filter((b) => !done || done.has(b.file));
+  for (const b of files) b.after = await currentContent(b.file);
+  if (!files.length) return;
+  history.push({ verb, files, index, at: Date.now() });
+  if (history.length > HISTORY_MAX) history.shift();
+  onHistory();
+}
 
 async function backupOf(entry) {
-  let content = null;
-  const doc = openDocFor(entry.file);
-  if (doc && doc.isDirty) {
-    content = doc.getText();
-  } else {
-    try {
-      content = await fs.promises.readFile(entry.file, 'utf8');
-    } catch {
-      // file does not exist (Claude deleted it)
-    }
-  }
+  const content = await currentContent(entry.file);
   const snaps = [];
   for (const p of entry.snapshots) {
     try {
@@ -533,59 +646,91 @@ async function restoreFile(entry) {
 }
 
 /** Undoes whole files, remembering Claude's version so that it can be restored. */
-async function undoFiles(list) {
-  const backups = [];
-  for (const entry of list) {
-    try {
-      const backup = await backupOf(entry);
-      await restoreFile(entry);
-      backups.push(backup);
-    } catch (e) {
-      vscode.window.showErrorMessage(`Claude Diff: ${path.basename(entry.file)}: ${e.message}`);
+const undoFiles = (list) =>
+  recorded('undo', list, async () => {
+    const done = new Set();
+    for (const entry of list) {
+      try {
+        await restoreFile(entry);
+        done.add(entry.file);
+      } catch (e) {
+        vscode.window.showErrorMessage(`Claude Diff: ${path.basename(entry.file)}: ${e.message}`);
+      }
     }
-  }
-  if (!backups.length) return;
-  lastUndo = { files: backups };
-  showRestore(backups.length);
-}
-
-/** Puts back what the last undo removed: Claude's version of the files, still pending review. */
-const restoreLastUndo = () =>
-  exclusive(async () => {
-    const undo = lastUndo;
-    if (!undo) return;
-    lastUndo = null;
-    showRestore(0);
-    await putBack(undo);
-    await refreshNow();
+    return done;
   });
 
-async function putBack(undo) {
-  for (const f of undo.files) {
-    const uri = vscode.Uri.file(f.file);
+/**
+ * Reverts the last Keep / Undo: the files and their review come back as they were just before it.
+ * A file changed since (by you or Claude) is left alone.
+ */
+const revertLast = () =>
+  exclusive(async () => {
+    const rec = history.pop();
+    onHistory();
+    if (!rec) {
+      vscode.window.setStatusBarMessage('$(info) Claude Diff: no Keep or Undo to revert', 3000);
+      return;
+    }
+    const back = [];
+    const skipped = [];
+    for (const f of rec.files) {
+      if (sameContent(await currentContent(f.file), f.after)) {
+        await putBack(f);
+        back.push(f.file);
+      } else skipped.push(path.basename(f.file));
+    }
+    await refreshNow();
+    if (skipped.length) {
+      vscode.window.showWarningMessage(`Claude Diff: not reverted, changed since: ${skipped.join(', ')}`);
+    }
+    // Back on screen, unless the review of that file is already there.
+    const entry = back.length === 1 && entries.get(norm(back[0]));
+    if (entry && activeKey() !== norm(entry.file)) await openFile(entry, false, undefined, rec.index || 0);
+    else if (entry) await focusChange(entry.file, rec.index || 0);
+  });
+
+/** Puts back one file and its snapshots as a backup holds them. */
+async function putBack(f) {
+  const uri = vscode.Uri.file(f.file);
+  const now = await currentContent(f.file);
+  if (now !== f.content) {
     tracker.expect(f.file, f.content);
+    const open = openDocFor(f.file);
     if (f.content === null) {
       try {
         await vscode.workspace.fs.delete(uri, { useTrash: false });
       } catch {
         // already gone
       }
+    } else if (open && open.isDirty) {
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(uri, new vscode.Range(open.positionAt(0), open.positionAt(open.getText().length)), stripBom(f.content));
+      await vscode.workspace.applyEdit(edit);
+      await open.save();
     } else {
       await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(f.file)));
       await vscode.workspace.fs.writeFile(uri, Buffer.from(f.content, 'utf8'));
     }
     await tracker.refresh(f.file);
-    for (const s of f.snaps) {
-      await fs.promises.mkdir(path.dirname(s.path), { recursive: true });
-      await fs.promises.writeFile(s.path, s.raw);
-    }
   }
+  // The snapshots as they were: drop those written since (a Keep rewrites the first one in place).
+  const keep = new Set(f.snaps.map((s) => s.path));
+  const later = (await readSnapshots()).get(norm(f.file)) || [];
+  await discard(later.map((s) => s.path).filter((p) => !keep.has(p)));
+  for (const s of f.snaps) {
+    await fs.promises.mkdir(path.dirname(s.path), { recursive: true });
+    await fs.promises.writeFile(s.path, s.raw);
+    snapCache.delete(s.path);
+  }
+  trackedFiles.add(norm(f.file));
 }
 
-async function keepEntries(list) {
-  for (const e of list) trackedFiles.delete(norm(e.file));
-  await discard(list.flatMap((e) => e.snapshots));
-}
+const keepEntries = (list) =>
+  recorded('keep', list, async () => {
+    for (const e of list) trackedFiles.delete(norm(e.file));
+    await discard(list.flatMap((e) => e.snapshots));
+  });
 
 /** Keeps or undoes one file; when it was the file on screen, moves on to the next one. */
 const fileAction = (arg, verb) => exclusive(() => applyFileAction(arg, verb));
@@ -719,46 +864,53 @@ async function keepCommitted(ops, held, snapshotsToo = true) {
 const changeGone = () =>
   vscode.window.setStatusBarMessage('$(info) Claude Diff: that change was already handled or has changed, nothing done', 4000);
 
+/**
+ * Keeps or undoes one change: the one a button was drawn for (file, signature, id), or with no
+ * argument (keyboard, command palette) the one under the cursor. Then the cursor moves to the next one.
+ */
+const hunkAction = (verb, fileArg, sig, id) =>
+  exclusive(async () => {
+    if (fileArg === undefined) {
+      const here = cursorChange(vscode.window.activeTextEditor);
+      if (!here) return goToChange(1); // not on a change: go to the next one first
+      [fileArg, sig, id] = here;
+    }
+    const [entry, hunk] = findHunk(fileArg, sig, id);
+    if (!entry || !hunk) {
+      if (entry) changeGone();
+      return refreshNow();
+    }
+    if (entry.isNew || entry.deleted) return applyFileAction(entry, verb);
+    const index = entry.hunks.indexOf(hunk);
+    const act = verb === 'keep' ? keepOne : undoOne;
+    await recorded(verb, [entry], () => act(entry, hunk), index);
+    await refreshNow();
+    await focusChange(entry.file, index);
+  });
+
 /** Accept one hunk: fold it into the baseline. */
-const keepHunk = (fileArg, sig, id) =>
-  exclusive(async () => {
-    const [entry, hunk] = findHunk(fileArg, sig, id);
-    if (!entry || !hunk) {
-      if (entry) changeGone();
-      return refreshNow();
-    }
-    if (entry.isNew || entry.deleted) return applyFileAction(entry, 'keep');
-    await writeBaseline(entry, (entry.bom ? '\ufeff' : '') + foldHunk(entry.baseline, entry.text, hunk));
-    await refreshNow();
-  });
+async function keepOne(entry, hunk) {
+  await writeBaseline(entry, (entry.bom ? '\ufeff' : '') + foldHunk(entry.baseline, entry.text, hunk));
+}
 
-/** Reject one hunk: put the original lines back into the document. */
-const undoHunk = (fileArg, sig, id) =>
-  exclusive(async () => {
-    const [entry, hunk] = findHunk(fileArg, sig, id);
-    if (!entry || !hunk) {
-      if (entry) changeGone();
-      return refreshNow();
-    }
-    if (entry.isNew || entry.deleted) return applyFileAction(entry, 'undo');
-
-    const uri = vscode.Uri.file(entry.file);
-    const doc = await vscode.workspace.openTextDocument(uri);
-    if (doc.getText() !== entry.text) {
-      vscode.window.setStatusBarMessage('$(warning) Claude Diff: the file changed, review it again', 4000);
-      return refreshNow();
-    }
-    const eol = doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
-    const original = splitLines(entry.baseline).slice(hunk.aStart, hunk.aEnd);
-    const p = planReplace(splitLines(entry.text), hunk.bStart, hunk.bEnd, original, eol);
-    const edit = new vscode.WorkspaceEdit();
-    edit.replace(uri, new vscode.Range(p.sl, p.sc, p.el, p.ec), p.text);
-    await vscode.workspace.applyEdit(edit);
-    tracker.expect(entry.file, doc.getText());
-    await doc.save();
-    await tracker.refresh(entry.file);
-    await refreshNow();
-  });
+/** Reject one hunk: put the original lines back into the document. Returns an empty set if it could not. */
+async function undoOne(entry, hunk) {
+  const uri = vscode.Uri.file(entry.file);
+  const doc = await vscode.workspace.openTextDocument(uri);
+  if (doc.getText() !== entry.text) {
+    vscode.window.setStatusBarMessage('$(warning) Claude Diff: the file changed, review it again', 4000);
+    return new Set();
+  }
+  const eol = doc.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+  const original = splitLines(entry.baseline).slice(hunk.aStart, hunk.aEnd);
+  const p = planReplace(splitLines(entry.text), hunk.bStart, hunk.bEnd, original, eol);
+  const edit = new vscode.WorkspaceEdit();
+  edit.replace(uri, new vscode.Range(p.sl, p.sc, p.el, p.ec), p.text);
+  await vscode.workspace.applyEdit(edit);
+  tracker.expect(entry.file, doc.getText());
+  await doc.save();
+  await tracker.refresh(entry.file);
+}
 
 // ---------------------------------------------------------------- legacy cleanup (<= 0.5 used a hook)
 
@@ -897,15 +1049,20 @@ class ReviewLenses {
       return `${plural(a, 'line')} → ${plural(b, 'line')}`;
     };
     const ids = idsOf(entry);
+    const baseLines = inReview ? [] : splitLines(entry.baseline);
     entry.hunks.forEach((h, k) => {
       const at = inReview ? model.hunkRows[k] : h.bStart;
       const line = Math.max(0, Math.min(at, doc.lineCount - 1));
       const r = new vscode.Range(line, 0, line, 0);
       const args = [entry.file, sigOf(h), ids[k]];
+      // In the file itself the old lines are not on screen: they are in the tooltip.
+      const removed = baseLines.slice(h.aStart, Math.min(h.aEnd, h.aStart + 30));
+      const more = h.aEnd - h.aStart - removed.length;
+      const old = removed.length ? `Before:\n${removed.join('\n')}${more > 0 ? `\n… ${plural(more, 'more line')}` : ''}` : '';
       lenses.push(
-        lens(r, '$(check) Keep', 'claudeDiff.keepHunk', args, 'Keep this change'),
-        lens(r, '$(discard) Undo', 'claudeDiff.undoHunk', args, 'Put the old lines back'),
-        lens(r, noun(h), '', [], '')
+        lens(r, '$(check) Keep', 'claudeDiff.keepHunk', args, `Keep this change (${KEYS.keep})`),
+        lens(r, '$(discard) Undo', 'claudeDiff.undoHunk', args, `Put the old lines back (${KEYS.undo})`),
+        lens(r, noun(h), '', [], old)
       );
     });
     return lenses;
@@ -1052,16 +1209,30 @@ async function activate(context) {
     else item.hide();
   };
 
+  // "Restore" shows for a minute after an Undo; Ctrl+Z in the review reverts any of the last actions.
   let restoreTimer;
-  showRestore = (count) => {
+  onHistory = () => {
     clearTimeout(restoreTimer);
-    if (!count) {
+    const last = history[history.length - 1];
+    vscode.commands.executeCommand('setContext', 'claudeDiff.canRevert', !!last);
+    const age = last ? Date.now() - last.at : Infinity;
+    if (!last || last.verb !== 'undo' || age >= 60 * 1000) {
       setVisible(bar.restore, false);
       return;
     }
-    bar.restore.tooltip = `Put back Claude's version of the ${plural(count, 'file')} you just undid`;
+    const what = last.files.length > 1 ? `the ${plural(last.files.length, 'file')} you just undid` : `what you just undid in ${path.basename(last.files[0].file)}`;
+    bar.restore.tooltip = `Put back Claude's version of ${what} (${KEYS.revert} in the review)`;
     setVisible(bar.restore, true);
-    restoreTimer = setTimeout(() => setVisible(bar.restore, false), 60 * 1000);
+    restoreTimer = setTimeout(() => setVisible(bar.restore, false), 60 * 1000 - age);
+  };
+
+  /** Ctrl+Y / Ctrl+N act on the change under the cursor, only while there is one. */
+  let inChange = false;
+  const updateCursorContext = () => {
+    const now = !!cursorChange(vscode.window.activeTextEditor);
+    if (now === inChange) return;
+    inChange = now;
+    vscode.commands.executeCommand('setContext', 'claudeDiff.cursorInChange', now);
   };
 
   const updateBar = () => {
@@ -1248,6 +1419,7 @@ async function activate(context) {
     view.badge = count ? { value: count, tooltip: `${plural(count, 'file')} changed by Claude` } : undefined;
     updateBar();
     vscode.window.visibleTextEditors.forEach(decorate);
+    updateCursorContext();
 
     let retry = false;
     for (const { uri, stamp } of staleDocs) {
@@ -1413,13 +1585,15 @@ async function activate(context) {
     },
     'claudeDiff.keepFile': (arg) => fileAction(arg, 'keep'),
     'claudeDiff.undoFile': (arg) => fileAction(arg, 'undo'),
-    'claudeDiff.keepHunk': (file, sig, id) => keepHunk(file, sig, id),
-    'claudeDiff.undoHunk': (file, sig, id) => undoHunk(file, sig, id),
+    'claudeDiff.keepHunk': (file, sig, id) => hunkAction('keep', file, sig, id),
+    'claudeDiff.undoHunk': (file, sig, id) => hunkAction('undo', file, sig, id),
+    'claudeDiff.nextChange': () => goToChange(1),
+    'claudeDiff.prevChange': () => goToChange(-1),
     'claudeDiff.keepAll': () => bulkAction('keep'),
     'claudeDiff.undoAll': () => bulkAction('undo'),
     'claudeDiff.nextFile': () => goToFile(1),
     'claudeDiff.prevFile': () => goToFile(-1),
-    'claudeDiff.restoreLastUndo': () => restoreLastUndo(),
+    'claudeDiff.restoreLastUndo': () => revertLast(),
     'claudeDiff.editFile': (arg) => editFile(arg),
     'claudeDiff.reviewFile': (arg) => {
       const entry = entryFromArg(arg);
@@ -1518,9 +1692,13 @@ async function activate(context) {
       if (trackedFiles.has(norm(doc.uri.fsPath))) schedule(50);
     }),
     vscode.window.onDidChangeVisibleTextEditors((eds) => eds.forEach(decorate)),
+    vscode.window.onDidChangeTextEditorSelection((e) => {
+      if (e.textEditor === vscode.window.activeTextEditor) updateCursorContext();
+    }),
     vscode.window.onDidChangeActiveTextEditor((ed) => {
       revealInExplorer(ed).catch(() => {});
       updateBar();
+      updateCursorContext();
       lenses.refresh();
       redirectToReview(ed).catch((e) => log.error(String((e && e.stack) || e)));
     })
@@ -1542,7 +1720,8 @@ async function activate(context) {
     _entries: () => [...entries.values()],
     _refresh: refresh,
     _decorations: decorations,
-    _hasUndo: () => !!lastUndo,
+    _hasUndo: () => history.length > 0 && history[history.length - 1].verb === 'undo',
+    _history: () => history.map((h) => ({ verb: h.verb, files: h.files.map((f) => f.file), index: h.index })),
     _review: (file) => {
       const e = entries.get(norm(file));
       return e && buildReview(e);

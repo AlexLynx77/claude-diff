@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0
+
+- Review with the keyboard, with the keys of VS Code's own Copilot edit review: `Ctrl+Y` keeps and `Ctrl+N` undoes the change under the cursor (only while the cursor is inside a change, and in the file itself only while it has no unsaved edits, so they keep their usual meaning everywhere else); `Alt+F5` / `Shift+Alt+F5` go to the next / previous change, then on to the next / previous file. `Claude Diff: Keep Change at Cursor`, `Undo Change at Cursor`, `Next Change` and `Previous Change` are in the command palette too.
+- After a Keep or an Undo on a block (button or key), the cursor lands on the next change: pressing the same key again goes on with the review.
+- Every Keep / Undo can now be reverted, not only a file undo: `Ctrl+Z` in the review view (or `Claude Diff: Revert Last Keep or Undo`) reverts the last ones, newest first (up to 20). The file and its review come back as they were before the action; a file changed since is left alone. The `Restore` button still shows for a minute after an Undo.
+- Long files: the diff now costs as much as the changes, not as the file (Myers' algorithm on large regions). Before, a few edits far apart in a file of several thousand lines could show as one huge change from the first edit to the last; they are now separate changes, found in milliseconds. Small regions are diffed exactly as before.
+- Fix: after undoing a deleted line, the review view could keep showing it as an old (greyed) line with its Keep / Undo buttons: the view looked the same as before (the old line and the restored line read alike), so it was not redrawn. Its colours and buttons now always follow the file.
+- In the file itself (`Edit file`), the size of a change (`2 lines → 3 lines`) shows the old lines in its tooltip.
+- Tests: the diff fuzz test also checks that diffs are minimal (against a reference LCS) on the Myers path and on a 60 000-line file; end-to-end tests of the keys, the cursor moving on, and reverting Keep, Undo and Keep file.
+
 ## 0.8.10
 
 - Fix: a file you create yourself while Claude is working was taken for a file created by Claude (or a change of Claude). Two cases: a file created from the explorer or by an extension, and a new untitled file saved under a name (for example after an extension inserted a header with a shortcut). Both are now recognised as yours. A file Claude creates in the meantime is still detected.
