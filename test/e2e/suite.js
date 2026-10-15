@@ -60,6 +60,7 @@ const ORIGINAL = {
   'r2.txt': text('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'),
   'r3.txt': text('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'),
   'r4.txt': text('p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9'),
+  'k.txt': text('k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7', 'k8', 'k9', 'k10', 'k11', 'k12'),
 };
 
 async function main() {
@@ -191,6 +192,8 @@ async function main() {
 
   await fastClicks({ ws, api, put, read, entry, beat });
 
+  await keyboardReview({ api, put, read, entry, beat });
+
   if (process.env.E2E_GIT) await gitScenarios({ ws, api, put, read, entry, beat });
 }
 
@@ -271,6 +274,106 @@ async function fastClicks({ api, put, read, entry, beat }) {
     }
   } else check('fast clicks: the change of r4.txt is detected', false, JSON.stringify(entry('r4.txt') && entry('r4.txt').hunks));
   check('fast clicks: nothing is left to review', api._entries().length === 0, JSON.stringify(api._entries().map((x) => path.basename(x.file))));
+}
+
+// Reviewing with the keyboard (Ctrl+Y / Ctrl+N on the change under the cursor, Alt+F5 to the next
+// change) and reverting a Keep or an Undo (Ctrl+Z in the review).
+async function keyboardReview({ api, put, read, entry, beat }) {
+  const K = ORIGINAL['k.txt'];
+  // three changes: k2 replaced, k6 removed, a line added after k10
+  const CLAUDE = text('k1', 'K2', 'k3', 'k4', 'k5', 'k7', 'k8', 'k9', 'k10', 'NEW', 'k11', 'k12');
+  put('k.txt', CLAUDE);
+  const ok = await until(() => {
+    beat();
+    const e = entry('k.txt');
+    return e && e.hunks.length === 3;
+  }, 30000);
+  check('keyboard: the three changes of k.txt are detected', ok, JSON.stringify(entry('k.txt') && entry('k.txt').hunks));
+  if (!ok) return;
+  const file = entry('k.txt').file;
+  const ed = () => vscode.window.activeTextEditor;
+  const cursor = () => ed().selection.active.line;
+  const starts = () => api._review(file).hunkRows;
+  const inReview = () => ed() && ed().document.uri.scheme === 'claude-review';
+  const settle = () => until(() => inReview() && ed().document.getText() === api._review(file).text, 5000, 50);
+  const count = () => (entry('k.txt') ? entry('k.txt').hunks.length : 0);
+  const put0 = (line) => {
+    const p = new vscode.Position(line, 0);
+    ed().selection = new vscode.Selection(p, p);
+  };
+
+  await vscode.commands.executeCommand('claudeDiff.openFile', file);
+  await settle();
+  check('keyboard: the review opens on the first change', inReview() && cursor() === starts()[0], `${cursor()} vs ${starts()}`);
+
+  // not on a change: the key moves to the next change, keeps nothing
+  put0(0);
+  await vscode.commands.executeCommand('claudeDiff.keepHunk');
+  check('keyboard: Keep with the cursor off any change only moves to the next one', count() === 3 && cursor() === starts()[0], `${count()} changes, line ${cursor()}`);
+
+  // Keep at cursor, then the cursor is on the next change
+  await vscode.commands.executeCommand('claudeDiff.keepHunk');
+  await settle();
+  const e1 = entry('k.txt');
+  check('keyboard: Keep at cursor keeps that change only', e1 && e1.hunks.length === 2 && e1.baseline.includes('K2') && read('k.txt') === CLAUDE, e1 && JSON.stringify(e1.baseline));
+  check('keyboard: after a Keep the cursor is on the next change', cursor() === starts()[0], `${cursor()} vs ${starts()}`);
+
+  // Undo at cursor: k6 comes back
+  await vscode.commands.executeCommand('claudeDiff.undoHunk');
+  await settle();
+  check('keyboard: Undo at cursor puts the old lines back', count() === 1 && read('k.txt').includes('k6\n'), JSON.stringify(read('k.txt')));
+  const roles = api._review(file).rows.map((r) => r.kind[0]).join('');
+  const shown = ed().document.getText();
+  check('review after the Undo: the line put back is a plain line, not an old one', !roles.includes('o') && roles.split('n').length === 2 && shown === api._review(file).text, roles);
+  check('keyboard: after an Undo the cursor is on the next change', cursor() === starts()[0], `${cursor()} vs ${starts()}`);
+
+  // Ctrl+Z: revert the Undo, then the Keep
+  await vscode.commands.executeCommand('claudeDiff.restoreLastUndo');
+  await settle();
+  check("revert: the last Undo is reverted (Claude's lines back, to review again)", read('k.txt') === CLAUDE && count() === 2, JSON.stringify(read('k.txt')));
+  await vscode.commands.executeCommand('claudeDiff.restoreLastUndo');
+  await settle();
+  const e2 = entry('k.txt');
+  check('revert: the Keep before it is reverted too (its change is to review again)', e2 && e2.hunks.length === 3 && e2.baseline === K, e2 && JSON.stringify(e2.baseline));
+
+  // Alt+F5: next change, through the three of them, then around (only file to review)
+  put0(0);
+  const seen = [];
+  for (let i = 0; i < 4; i++) {
+    await vscode.commands.executeCommand('claudeDiff.nextChange');
+    seen.push(cursor());
+  }
+  const s = starts();
+  check('Alt+F5 goes from change to change, then back to the first', JSON.stringify(seen) === JSON.stringify([s[0], s[1], s[2], s[0]]), `${seen} vs ${s}`);
+  await vscode.commands.executeCommand('claudeDiff.prevChange');
+  check('Shift+Alt+F5 goes back around to the last change', cursor() === s[2], `${cursor()} vs ${s}`);
+
+  // Keep file, then revert it: the whole review of the file comes back
+  await vscode.commands.executeCommand('claudeDiff.keepFile', file);
+  await until(() => !entry('k.txt'), 5000);
+  check('revert: Keep file clears the file', !entry('k.txt'));
+  await vscode.commands.executeCommand('claudeDiff.restoreLastUndo');
+  await until(() => entry('k.txt'), 5000);
+  check('revert: reverting Keep file brings its three changes back', count() === 3 && read('k.txt') === CLAUDE, count());
+
+  // A revert never overwrites a file changed since the action
+  await vscode.commands.executeCommand('claudeDiff.undoFile', file);
+  await until(() => !entry('k.txt'), 5000);
+  check('keyboard: Undo file restores the original', read('k.txt') === K, JSON.stringify(read('k.txt')));
+  put('k.txt', K.replace('k1', 'mine'));
+  await vscode.commands.executeCommand('claudeDiff.restoreLastUndo');
+  await sleep(1500);
+  check('revert: a file changed since is left alone', read('k.txt') === K.replace('k1', 'mine'), JSON.stringify(read('k.txt')));
+  put('k.txt', K);
+  await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  await until(() => {
+    beat();
+    return api._entries().length === 0;
+  }, 10000);
+  if (api._entries().length) {
+    await vscode.commands.executeCommand('claudeDiff.keepAll');
+    await sleep(1000);
+  }
 }
 
 // git rewrites files while Claude is "active": that must never bring reviewed changes back.

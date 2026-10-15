@@ -15,8 +15,19 @@ See, keep or undo the file changes made by [Claude Code](https://claude.com/clau
   - If the file is already on screen when Claude changes it, its review appears right away.
   - When the last block of a file is kept or undone, its review closes and the next changed file opens.
   - The review tab has the file's own name and icon, and the Explorer expands to the file and selects it, like for any file.
+- **Review with the keyboard**, with the same keys as VS Code's own Copilot edit review:
+
+  | Key | |
+  |---|---|
+  | `Ctrl+Y` (`⌘Y`) | Keep the change under the cursor |
+  | `Ctrl+N` (`⌘N`) | Undo the change under the cursor |
+  | `Alt+F5` / `Shift+Alt+F5` | Next / previous change, then the next / previous file |
+  | `Ctrl+Z` (`⌘Z`) in the review | Revert the last Keep or Undo |
+
+  After a Keep or an Undo the cursor lands on the next change, so pressing the same key again goes on with the review. `Ctrl+Y` / `Ctrl+N` only act while the cursor is inside a change (and, in the file itself, while it has no unsaved edits); everywhere else they keep their usual meaning. All of them can be changed in *Keyboard Shortcuts* (search for `Claude Diff`).
 - **Nothing is ever kept or undone by default.** Opening, leaving or closing a file, or moving to the next/previous one, changes nothing. A file leaves the review only when you keep or undo it (or all changes).
-- **No notifications, no confirmation dialogs.** An undo can be reverted with `Restore`, shown in the review bar for a minute (also `Claude Diff: Restore Last Undo`).
+- **No notifications, no confirmation dialogs.** Each of the last 20 Keep / Undo actions can be reverted, newest first: `Ctrl+Z` in the review, or `Claude Diff: Revert Last Keep or Undo`. After an Undo, a `Restore` button also shows in the review bar for a minute. A file changed since the action (by you or Claude) is left alone.
+- In the file itself, the size of each change (`2 lines → 3 lines`) shows the old lines in its tooltip.
 - Pending reviews survive a window reload.
 
 ## How it works
@@ -55,7 +66,8 @@ Versions ≤ 0.5 installed a Claude Code hook; it is removed automatically.
 
 - Changes made outside the editor by you or another tool *while Claude is working* (up to 2 minutes after its last activity) are attributed to Claude.
 - Files larger than 2 MB, binary files and folders listed in `claudeDiff.exclude` are not tracked; at most 20,000 files per workspace.
-- Extensions cannot insert lines into a regular editor (Copilot is built into VS Code), so the old lines are shown in the separate, read-only review view. Its line numbers are those of the real file (old lines have none).
+- Extensions cannot show lines that are not in a regular editor's text (Copilot is built into VS Code), so the old lines are shown in the separate, read-only review view. Its line numbers are those of the real file (old lines have none). Some extensions instead insert the old lines into the file's own buffer until it is saved; with Claude Code writing the file on disk at the same time, and reading the editor's diagnostics, that would show Claude errors that are not in the file and risk unsaved-buffer conflicts, so Claude Diff does not.
+- The undo history of Keep / Undo lives in memory: it is lost when the window reloads (pending reviews are not).
 - The review bar lives in the status bar: extensions cannot draw a floating toolbar over the editor like the built-in Copilot one.
 
 ## Development
