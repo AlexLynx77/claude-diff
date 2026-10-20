@@ -195,6 +195,23 @@ async function main() {
   await keyboardReview({ api, put, read, entry, beat });
 
   if (process.env.E2E_GIT) await gitScenarios({ ws, api, put, read, entry, beat });
+
+  // ---- a long Write: nothing in the transcript for minutes, then the file and the transcript at once
+  const past = (Date.now() - 10 * 60 * 1000) / 1000;
+  fs.utimesSync(transcript, past, past);
+  await sleep(3000); // Claude now looks idle
+  put('wake-user.txt', 'changed by the user while Claude was silent\n');
+  fs.utimesSync(path.join(ws, 'wake-user.txt'), Date.now() / 1000 - 60, Date.now() / 1000 - 60);
+  put('wake-claude.js', 'console.log("a long file");\n');
+  beat();
+  const woke = await until(() => {
+    beat();
+    return entry('wake-claude.js');
+  }, 30000);
+  check('wake-up: a file Claude creates after a long silence is detected', woke && woke.isNew, JSON.stringify(api._entries().map((e) => path.basename(e.file))));
+  check('wake-up: a file changed before Claude wakes up is not Claude\'s', !entry('wake-user.txt'), JSON.stringify(api._entries().map((e) => path.basename(e.file))));
+  await vscode.commands.executeCommand('claudeDiff.keepAll');
+  await sleep(1500);
 }
 
 // Clicks made faster than the extension redraws its buttons (the later ones carry the coordinates of
@@ -578,6 +595,7 @@ async function gitScenarios({ ws, api, put, read, entry, beat }) {
   await vscode.commands.executeCommand('workbench.action.closeAllEditors');
   await vscode.commands.executeCommand('claudeDiff.keepAll');
   await sleep(1500);
+
 }
 
 async function run() {

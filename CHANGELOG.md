@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.1
+
+- Fix: a file Claude created could go unnoticed, neither in the review nor anywhere else. While Claude writes a long file, nothing is written to its transcript, sometimes for several minutes: the extension took Claude for idle, and when the file landed, it was absorbed as the user's own work along with everything else. A file written right when Claude wakes up (since the last check that still saw it idle) is now Claude's; what changed before is still yours.
+- End-to-end test of a file created after a long silence.
+
 ## 0.9.0
 
 - Review with the keyboard, with the keys of VS Code's own Copilot edit review: `Ctrl+Y` keeps and `Ctrl+N` undoes the change under the cursor (only while the cursor is inside a change, and in the file itself only while it has no unsaved edits, so they keep their usual meaning everywhere else); `Alt+F5` / `Shift+Alt+F5` go to the next / previous change, then on to the next / previous file. `Claude Diff: Keep Change at Cursor`, `Undo Change at Cursor`, `Next Change` and `Previous Change` are in the command palette too.

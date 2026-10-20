@@ -15,6 +15,12 @@ const REVIEW = 'claude-review';
 /** How long what was typed in an untitled buffer is remembered, to recognise it once saved. */
 const UNTITLED_MEMORY_MS = 10 * 60 * 1000;
 const ACTIVE_MS = Number(process.env.CLAUDE_DIFF_ACTIVE_MS) || 2 * 60 * 1000;
+/**
+ * Claude writes nothing in its transcript while it generates a long file, and may look idle for
+ * minutes. When it wakes up, a file written since the last check that still saw it idle is its own
+ * (with this much slack for coarse file times).
+ */
+const WAKE_SLACK_MS = 1000;
 /** Workspace scan period while Claude is not working (keeps the "before" contents current). */
 const IDLE_SCAN_MS = 15 * 1000;
 const LEGACY_HOOK_FILE = 'claude-diff-hook.js';
@@ -1477,6 +1483,8 @@ async function activate(context) {
     return flushed;
   };
   let wasActive = false;
+  /** When a check last saw Claude idle (its transcript silent). */
+  let idleSeenAt = 0;
   let lastScan = 0;
   let scanEvery = 1000;
   const detect = async () => {
@@ -1514,13 +1522,17 @@ async function activate(context) {
     const flushed = await flushHeld();
     if (flushed) await refresh();
 
+    const checkedAt = Date.now();
     const last = await activity.last(folders);
     const active = last > 0 && Date.now() - last < ACTIVE_MS;
+    if (!active) idleSeenAt = checkedAt;
     const due = Date.now() - lastScan > (active ? scanEvery : IDLE_SCAN_MS);
     if (active === wasActive && !due && tracker.ready) return;
 
-    // When Claude starts working, first absorb what changed before (the user's own work).
-    const attribute = active && wasActive;
+    // When Claude starts working, first absorb what changed before (the user's own work), except
+    // what was written along with the transcript (a long Write after minutes of silence).
+    const since = idleSeenAt - WAKE_SLACK_MS;
+    const attribute = active && wasActive ? true : active ? (mtime) => mtime !== undefined && mtime >= since : false;
     if (active !== wasActive) log.info(active ? 'Claude is working' : 'Claude is idle');
     wasActive = active;
     const t0 = Date.now();
