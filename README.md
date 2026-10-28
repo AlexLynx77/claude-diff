@@ -32,15 +32,15 @@ See, keep or undo the file changes made by [Claude Code](https://claude.com/clau
 
 ## How it works
 
-- Claude Code writes a transcript (`~/.claude/projects/…/*.jsonl`) while it works. When that transcript is active for the open folder, Claude is considered to be working.
+- Claude Code writes a transcript (`~/.claude/projects/…/*.jsonl`, and one per sub-agent) while it works. When one of them is active for the open folder, Claude is considered to be working.
 - The extension keeps the last known content of the workspace's text files. Any file that changes while Claude works — edit tool, shell command, script, new or deleted file, git-ignored files like `.env` — becomes a change to review, compared with its content from just before.
-- Your own edits saved in the editor, and changes made while Claude is idle, are not attributed to Claude.
+- Your own edits saved in the editor, files and folders you create, delete or move from VS Code (explorer, extensions), and changes made while Claude is idle, are not attributed to Claude. Deleting a file Claude changed takes it out of the review. Changes made outside VS Code (a terminal, another app) while Claude works can't be told apart from Claude's.
 
 ## Privacy
 
 Everything stays on your machine; the extension makes no network request.
 
-- It only looks at the *modification time* of Claude Code's transcripts (`~/.claude/projects/…/*.jsonl`, or `$CLAUDE_CONFIG_DIR/projects`) to know when Claude is working. It never reads their content.
+- It only looks at the *modification time* of Claude Code's transcripts (`~/.claude/projects/…/*.jsonl` and their `subagents/` folders, or `$CLAUDE_CONFIG_DIR/projects`) to know when Claude is working. It never reads their content.
 - To be able to show and undo a change, it keeps a copy of each file's content from just before Claude changed it, in VS Code's per-workspace storage folder (outside your project). **This includes git-ignored files such as `.env`**, stored as plain text there, until you keep or undo the change. Add folders to `claudeDiff.exclude` to keep them out of tracking.
 - It never writes to your project except when you press Undo / Restore (and, once, to remove the hook installed by versions ≤ 0.5).
 

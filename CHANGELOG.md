@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.2
+
+- Fix: a file you delete while Claude is working could show up in the review as deleted by Claude. Files and folders deleted, renamed or moved from VS Code (explorer, extensions) are now recognised as yours, like the ones you create; a folder pasted from the explorer too.
+- Fix: deleting a file that Claude had changed left it in the review as "deleted by Claude". Deleting (or moving) it is your decision: it now leaves the review.
+- Fix: a file created by a sub-agent of Claude could go unnoticed. A sub-agent writes its own transcript (`<session>/subagents/*.jsonl`) and the session's stays silent until it is done, often for minutes: the extension took Claude for idle and absorbed the sub-agent's files as yours. Sub-agent transcripts now count as Claude working.
+- Fix: an empty file created by Claude (`__init__.py`, `.gitkeep`...) could be taken for yours when an emptied untitled buffer was open.
+- End-to-end tests for each case.
+
 ## 0.9.1
 
 - Fix: a file Claude created could go unnoticed, neither in the review nor anywhere else. While Claude writes a long file, nothing is written to its transcript, sometimes for several minutes: the extension took Claude for idle, and when the file landed, it was absorbed as the user's own work along with everything else. A file written right when Claude wakes up (since the last check that still saw it idle) is now Claude's; what changed before is still yours.

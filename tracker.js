@@ -11,6 +11,8 @@ const path = require('path');
 const MAX_BYTES = 2 * 1024 * 1024;
 const MAX_FILES = 20000;
 const MAX_CACHE_CHARS = 200e6;
+/** A sub-agent's transcript is looked for in sessions written this recently. */
+const SUBAGENT_WINDOW_MS = 6 * 60 * 60 * 1000;
 
 /** `expect(file, ANY)`: whatever content is seen next is the user's (a file created from the explorer). */
 const ANY = Symbol('any');
@@ -52,21 +54,32 @@ class Activity {
       }
     }
     let latest = 0;
-    for (const dir of this.dirs) {
+    const newest = async (dir) => {
       let names;
       try {
         names = await fs.promises.readdir(dir);
       } catch {
-        continue;
+        return [];
       }
+      const seen = [];
       for (const n of names) {
         if (!n.endsWith('.jsonl')) continue;
         try {
           const m = (await fs.promises.stat(path.join(dir, n))).mtimeMs;
           if (m > latest) latest = m;
+          seen.push({ id: n.slice(0, -6), m });
         } catch {
           // removed meanwhile
         }
+      }
+      return seen;
+    };
+    for (const dir of this.dirs) {
+      const sessions = await newest(dir);
+      // A sub-agent writes its own transcript (<session>/subagents/*.jsonl): the session's stays
+      // silent until it is done, sometimes for many minutes.
+      for (const s of sessions) {
+        if (Date.now() - s.m < SUBAGENT_WINDOW_MS) await newest(path.join(dir, s.id, 'subagents'));
       }
     }
     return latest;
@@ -83,6 +96,8 @@ class Tracker {
     this.ready = false;
     /** norm(path) -> {content, until}: a write made by the user or the extension, not by Claude */
     this.expected = new Map();
+    /** Same, for a whole folder (or a file): {prefix: norm(path), content, until, seen: keys already matched} */
+    this.trees = [];
     this.truncated = false;
   }
 
@@ -94,7 +109,29 @@ class Tracker {
     this.expected.set(norm(file), { content, until: Date.now() + ms });
   }
 
+  /**
+   * Like `expect`, for `target` and everything under it (a folder deleted, moved or pasted from
+   * the explorer): `content` is null (gone) or ANY (whatever appears). Each file matches once.
+   */
+  expectTree(target, content, ms = 30000) {
+    this.trees.push({ prefix: norm(target), content, until: Date.now() + ms, seen: new Set() });
+  }
+
+  inTree(key, content) {
+    const now = Date.now();
+    this.trees = this.trees.filter((t) => t.until >= now);
+    for (const t of this.trees) {
+      if (key !== t.prefix && !key.startsWith(t.prefix + path.sep)) continue;
+      if (t.seen.has(key)) continue;
+      if (t.content === ANY ? content === null : content !== null) continue;
+      t.seen.add(key);
+      return true;
+    }
+    return false;
+  }
+
   isExpected(key, content) {
+    if (this.inTree(key, content)) return true;
     const e = this.expected.get(key);
     if (!e) return false;
     if (e.until < Date.now()) {
