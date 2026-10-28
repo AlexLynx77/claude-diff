@@ -196,6 +196,8 @@ async function main() {
 
   if (process.env.E2E_GIT) await gitScenarios({ ws, api, put, read, entry, beat });
 
+  await userFileOps({ ws, api, put, entry, beat });
+
   // ---- a long Write: nothing in the transcript for minutes, then the file and the transcript at once
   const past = (Date.now() - 10 * 60 * 1000) / 1000;
   fs.utimesSync(transcript, past, past);
@@ -210,6 +212,24 @@ async function main() {
   }, 30000);
   check('wake-up: a file Claude creates after a long silence is detected', woke && woke.isNew, JSON.stringify(api._entries().map((e) => path.basename(e.file))));
   check('wake-up: a file changed before Claude wakes up is not Claude\'s', !entry('wake-user.txt'), JSON.stringify(api._entries().map((e) => path.basename(e.file))));
+  await vscode.commands.executeCommand('claudeDiff.keepAll');
+  await sleep(1500);
+
+  // ---- a sub-agent at work: the session's transcript is silent, the sub-agent's is written
+  const silent = new Date(Date.now() - 10 * 60 * 1000);
+  fs.utimesSync(transcript, silent, silent);
+  await sleep(3000); // the extension now takes Claude for idle
+  const subDir = path.join(dir, 'session', 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  const subBeat = () => fs.appendFileSync(path.join(subDir, 'agent-1.jsonl'), '{"t":1}\n');
+  subBeat();
+  await sleep(1500);
+  put('sub-made.js', 'console.log("sub-agent");\n');
+  const bySub = await until(() => {
+    subBeat();
+    return entry('sub-made.js');
+  }, 30000);
+  check('claude: a file created by a sub-agent is detected', bySub && bySub.isNew, api._entries().map((x) => path.basename(x.file)));
   await vscode.commands.executeCommand('claudeDiff.keepAll');
   await sleep(1500);
 }
@@ -595,7 +615,69 @@ async function gitScenarios({ ws, api, put, read, entry, beat }) {
   await vscode.commands.executeCommand('workbench.action.closeAllEditors');
   await vscode.commands.executeCommand('claudeDiff.keepAll');
   await sleep(1500);
+}
 
+// Files the user deletes, moves or empties from VS Code while Claude is working.
+async function userFileOps({ ws, api, put, entry, beat }) {
+  const watch = async (ms) => {
+    const start = Date.now();
+    while (Date.now() - start < ms) {
+      beat();
+      await sleep(500);
+    }
+  };
+  // ---- files deleted or moved by the user (explorer) while Claude is working
+  fs.mkdirSync(path.join(ws, 'user-dir'), { recursive: true });
+  for (const f of ['user-del.txt', 'user-dir/one.txt', 'user-dir/two.txt', 'user-mv.txt', 'user-edited.txt']) put(f, 'mine\n');
+  const anyUser = () => api._entries().map((e) => path.relative(ws, e.file)).filter((r) => /user-/.test(r));
+  await until(() => {
+    beat();
+    return anyUser().length === 5;
+  }, 30000);
+  await vscode.commands.executeCommand('claudeDiff.keepAll'); // now plain files of the project
+  await watch(2000);
+  check('user: setup leaves nothing to review', anyUser().length === 0, anyUser());
+  const uri = (f) => vscode.Uri.file(path.join(ws, f));
+  const wsEdit = async (fn) => {
+    const e = new vscode.WorkspaceEdit();
+    fn(e);
+    await vscode.workspace.applyEdit(e);
+  };
+  await wsEdit((e) => e.deleteFile(uri('user-del.txt')));
+  await watch(4000);
+  check('user: a file deleted from the explorer is not Claude\'s', !fs.existsSync(path.join(ws, 'user-del.txt')) && anyUser().length === 0, anyUser());
+  await wsEdit((e) => e.deleteFile(uri('user-dir'), { recursive: true }));
+  await watch(4000);
+  check('user: a folder deleted from the explorer is not Claude\'s', !fs.existsSync(path.join(ws, 'user-dir')) && anyUser().length === 0, anyUser());
+  await wsEdit((e) => e.renameFile(uri('user-mv.txt'), uri('user-moved.txt')));
+  await watch(4000);
+  check('user: a file renamed from the explorer is not Claude\'s', fs.existsSync(path.join(ws, 'user-moved.txt')) && anyUser().length === 0, anyUser());
+
+  // Claude changes a file, then the user deletes it: it leaves the review (not "deleted by Claude")
+  put('user-edited.txt', 'mine\nclaude\n');
+  const edited = await until(() => {
+    beat();
+    return entry('user-edited.txt');
+  }, 30000);
+  check('user: setup, a change of Claude is pending', edited && !edited.isNew, anyUser());
+  await wsEdit((e) => e.deleteFile(uri('user-edited.txt')));
+  await watch(4000);
+  check('user: a file Claude changed, then deleted by the user, leaves the review', !entry('user-edited.txt'), anyUser());
+
+  // An emptied untitled buffer does not make an empty file of Claude's look like the user's
+  const scratch = await vscode.workspace.openTextDocument({ content: '' });
+  const ed3 = await vscode.window.showTextDocument(scratch);
+  await ed3.edit((b) => b.insert(new vscode.Position(0, 0), 'scratch'));
+  await ed3.edit((b) => b.delete(new vscode.Range(0, 0, 0, 7)));
+  put('user-empty.py', '');
+  const empty = await until(() => {
+    beat();
+    return entry('user-empty.py');
+  }, 30000);
+  check('claude: an empty file is detected even next to an emptied untitled buffer', empty && empty.isNew, anyUser());
+  await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  await vscode.commands.executeCommand('claudeDiff.keepAll');
+  await sleep(1500);
 }
 
 async function run() {

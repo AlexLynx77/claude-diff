@@ -1164,6 +1164,8 @@ async function activate(context) {
   const flat = (s) => stripBom(s).replace(/\r\n/g, '\n');
   const isUserText = (content) => {
     const want = flat(content);
+    // An empty file says nothing about who made it (and an emptied untitled buffer is common).
+    if (!want.trim()) return false;
     const now = Date.now();
     for (const [k, u] of untitledTexts) {
       if (now - u.at > UNTITLED_MEMORY_MS) untitledTexts.delete(k);
@@ -1579,6 +1581,29 @@ async function activate(context) {
     }
   }, 700);
 
+  /**
+   * The user deleted (or moved away) files that Claude had changed: that is their decision, so
+   * the review of those files goes away instead of showing them as deleted by Claude.
+   */
+  const forgetUserRemoved = (uris) => {
+    const roots = uris.filter((u) => u.scheme === 'file').map((u) => norm(u.fsPath));
+    if (!roots.length) return;
+    const under = (key) => roots.some((r) => key === r || key.startsWith(r + path.sep));
+    if (![...trackedFiles].some(under)) return;
+    exclusive(async () => {
+      let dropped = 0;
+      for (const entry of [...entries.values()]) {
+        const key = norm(entry.file);
+        if (!under(key) || fs.existsSync(entry.file)) continue;
+        log.info(`removed by the user: ${entry.file} (no longer in the review)`);
+        trackedFiles.delete(key);
+        await discard(entry.snapshots);
+        dropped++;
+      }
+      if (dropped) await refreshNow();
+    }).catch((err) => log.error(String((err && err.stack) || err)));
+  };
+
   // The user's own saves are never Claude's changes.
   const typed = new Set();
   const onUserSave = (doc) => {
@@ -1665,10 +1690,22 @@ async function activate(context) {
       tracker.ready = false;
       schedule();
     }),
-    // A file created from VS Code (explorer, an extension) is the user's, not Claude's.
-    vscode.workspace.onDidCreateFiles((e) => {
-      for (const uri of e.files) if (uri.scheme === 'file') tracker.expect(uri.fsPath, ANY);
+    // A file created, deleted or moved from VS Code (explorer, an extension) is the user's doing,
+    // not Claude's; a whole folder too. Registered before the operation, so no scan can see it first.
+    vscode.workspace.onWillCreateFiles((e) => {
+      for (const uri of e.files) if (uri.scheme === 'file') tracker.expectTree(uri.fsPath, ANY);
     }),
+    vscode.workspace.onWillDeleteFiles((e) => {
+      for (const uri of e.files) if (uri.scheme === 'file') tracker.expectTree(uri.fsPath, null);
+    }),
+    vscode.workspace.onDidDeleteFiles((e) => forgetUserRemoved(e.files)),
+    vscode.workspace.onWillRenameFiles((e) => {
+      for (const { oldUri, newUri } of e.files) {
+        if (oldUri.scheme === 'file') tracker.expectTree(oldUri.fsPath, null);
+        if (newUri.scheme === 'file') tracker.expectTree(newUri.fsPath, ANY);
+      }
+    }),
+    vscode.workspace.onDidRenameFiles((e) => forgetUserRemoved(e.files.map((f) => f.oldUri))),
     vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.scheme === 'untitled') {
         untitledTexts.set(e.document.uri.toString(), { text: e.document.getText(), at: Date.now() });
