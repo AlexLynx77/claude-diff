@@ -13,6 +13,9 @@ const MAX_FILES = 20000;
 const MAX_CACHE_CHARS = 200e6;
 /** A sub-agent's transcript is looked for in sessions written this recently. */
 const SUBAGENT_WINDOW_MS = 6 * 60 * 60 * 1000;
+/** Tool calls older than this no longer explain a file change. */
+const CLAIM_WINDOW_MS = 15 * 60 * 1000;
+const CLAIM_TAIL_BYTES = 2 * 1024 * 1024;
 
 /** `expect(file, ANY)`: whatever content is seen next is the user's (a file created from the explorer). */
 const ANY = Symbol('any');
@@ -84,6 +87,100 @@ class Activity {
     }
     return latest;
   }
+
+  /**
+   * What Claude itself asked for lately, read from the tail of the transcripts: the files its edit
+   * tools target and the shell commands it ran. A file that changes without being in either is
+   * the output of a script or a build, not Claude's work.
+   * `known` is false when no transcript could be read (then nothing can be told apart).
+   */
+  async claims(folders, windowMs = CLAIM_WINDOW_MS) {
+    await this.last(folders);
+    const files = new Set();
+    const commands = [];
+    let known = false;
+    const cutoff = Date.now() - windowMs;
+    const readTail = async (file) => {
+      let h;
+      try {
+        h = await fs.promises.open(file, 'r');
+        const size = (await h.stat()).size;
+        const len = Math.min(size, CLAIM_TAIL_BYTES);
+        const buf = Buffer.alloc(len);
+        await h.read(buf, 0, len, size - len);
+        known = true;
+        const lines = buf.toString('utf8').split('\n');
+        if (size > len) lines.shift(); // cut in the middle of a line
+        for (const line of lines) {
+          if (!line.includes('tool_use')) continue;
+          let o;
+          try {
+            o = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          const t = o.timestamp ? Date.parse(o.timestamp) : NaN;
+          if (t < cutoff) continue;
+          const content = o.message && o.message.content;
+          if (!Array.isArray(content)) continue;
+          for (const c of content) {
+            if (!c || c.type !== 'tool_use' || !c.input) continue;
+            const p = c.input.file_path || c.input.notebook_path;
+            if (typeof p === 'string') files.add(norm(path.resolve(p)));
+            if (typeof c.input.command === 'string') commands.push(norm(c.input.command.replace(/\\/g, '/')));
+          }
+        }
+      } catch {
+        // unreadable or removed meanwhile
+      } finally {
+        if (h) await h.close().catch(() => {});
+      }
+    };
+    const recent = async (dir) => {
+      let names;
+      try {
+        names = await fs.promises.readdir(dir);
+      } catch {
+        return [];
+      }
+      const out = [];
+      for (const n of names) {
+        if (!n.endsWith('.jsonl')) continue;
+        try {
+          const m = (await fs.promises.stat(path.join(dir, n))).mtimeMs;
+          if (m >= cutoff) out.push(path.join(dir, n));
+        } catch {
+          // removed meanwhile
+        }
+      }
+      return out;
+    };
+    for (const dir of this.dirs) {
+      for (const f of await recent(dir)) {
+        await readTail(f);
+        for (const s of await recent(path.join(dir, path.basename(f, '.jsonl'), 'subagents'))) await readTail(s);
+      }
+    }
+    return { known, files, commands };
+  }
+}
+
+/**
+ * Did Claude ask for the change of `file`? Yes when an edit tool targeted it, or when a shell
+ * command it ran names it (by relative path or by file name: `cat > a.txt`, `sed -i ... a.txt`).
+ * Without readable transcripts, everything is assumed to be Claude's.
+ */
+function claimed(claims, file, folders) {
+  if (!claims.known) return true;
+  const key = norm(path.resolve(file));
+  if (claims.files.has(key)) return true;
+  const base = norm(path.basename(file));
+  const rels = folders
+    .map((f) => path.relative(f, file))
+    .filter((r) => r && !r.startsWith('..') && !path.isAbsolute(r))
+    .map((r) => norm(r.replace(/\\/g, '/')));
+  const abs = norm(path.resolve(file).replace(/\\/g, '/'));
+  return claims.commands.some((c) => c.includes(abs) || rels.some((r) => c.includes(r)) || (base.length > 2 && c.includes(base)));
 }
 
 class Tracker {
@@ -270,4 +367,4 @@ class Tracker {
   }
 }
 
-module.exports = { Activity, Tracker, ANY, encode, norm };
+module.exports = { Activity, Tracker, ANY, encode, norm, claimed };

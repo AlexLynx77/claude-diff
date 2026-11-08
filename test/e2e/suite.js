@@ -70,7 +70,19 @@ async function main() {
   await until(() => api._ready());
   check('extension activates and the tracker is ready', api._ready(), 'tracker never became ready');
 
-  const put = (f, s) => fs.writeFileSync(path.join(ws, f), s);
+  // What Claude asked for with its tools: each file written by `put` is a Write tool call of the
+  // transcript (the next beat records it), `generate` writes a file as a build would, with no call.
+  const toClaim = [];
+  const claimLines = () =>
+    toClaim
+      .splice(0)
+      .map((f) => JSON.stringify({ timestamp: new Date().toISOString(), message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: f } }] } }) + '\n')
+      .join('');
+  const put = (f, s) => {
+    toClaim.push(path.join(ws, f));
+    fs.writeFileSync(path.join(ws, f), s);
+  };
+  const generate = (f, s) => fs.writeFileSync(path.join(ws, f), s);
   const read = (f) => fs.readFileSync(path.join(ws, f), 'utf8');
   const entry = (f) => api._entries().find((e) => path.basename(e.file) === f);
   for (const [f, s] of Object.entries(ORIGINAL)) put(f, s);
@@ -80,7 +92,7 @@ async function main() {
   const dir = path.join(process.env.CLAUDE_CONFIG_DIR, 'projects', ws.replace(/[^a-zA-Z0-9]/g, '-'));
   fs.mkdirSync(dir, { recursive: true });
   const transcript = path.join(dir, 'session.jsonl');
-  const beat = () => fs.appendFileSync(transcript, '{"t":1}\n');
+  const beat = () => fs.appendFileSync(transcript, '{"t":1}\n' + claimLines());
   beat();
   await sleep(8000); // the extension notices activity, then absorbs the current state
   beat();
@@ -92,8 +104,10 @@ async function main() {
   put('d.css', 'body {\n  color: blue;\n}\n.b {\n  margin: 1px;\n}\n');
   put('e.crlf.txt', 'one\r\nTWO\r\nthree\r\nfour\r\n');
   put('f.bom.js', '\ufeffconst a = 10;\nconst b = 2;\n');
+  toClaim.push(path.join(ws, 'g.txt'));
   fs.unlinkSync(path.join(ws, 'g.txt'));
   put('new.js', 'console.log(1);\n');
+  generate('build-output.js', 'console.log("made by a build");\n'); // no tool call names it
 
   const expected = ['a.json', 'b.js', 'c.py', 'd.css', 'e.crlf.txt', 'f.bom.js', 'g.txt', 'new.js'];
   const detected = await until(() => {
@@ -103,7 +117,9 @@ async function main() {
   }, 30000);
   check('the 8 changes are detected', detected, JSON.stringify(api._entries().map((e) => path.basename(e.file))));
   if (!detected) return;
-  check('modified files are not mistaken for new files', !entry('b.js').isNew && !entry('a.json').isNew);
+  await sleep(7000); // longer than the time a change waits for a tool call that explains it
+  check('a file written by a script or build (no tool call names it) is not reviewed', !entry('build-output.js'), JSON.stringify(api._entries().map((e) => path.basename(e.file))));
+  check('modified files are not mistaken for new files',!entry('b.js').isNew && !entry('a.json').isNew);
   check('new file is flagged as new', entry('new.js').isNew);
   check('deleted file is flagged as deleted', entry('g.txt').deleted);
 
@@ -221,7 +237,7 @@ async function main() {
   await sleep(3000); // the extension now takes Claude for idle
   const subDir = path.join(dir, 'session', 'subagents');
   fs.mkdirSync(subDir, { recursive: true });
-  const subBeat = () => fs.appendFileSync(path.join(subDir, 'agent-1.jsonl'), '{"t":1}\n');
+  const subBeat = () => fs.appendFileSync(path.join(subDir, 'agent-1.jsonl'), '{"t":1}\n' + claimLines());
   subBeat();
   await sleep(1500);
   put('sub-made.js', 'console.log("sub-agent");\n');

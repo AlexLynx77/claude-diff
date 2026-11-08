@@ -5,7 +5,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { splitLines, detectEol, diffLines, planReplace, foldHunk, sigOf, hunkIds, matchHunk } = require('./diff');
-const { Activity, Tracker, ANY, norm } = require('./tracker');
+const { Activity, Tracker, ANY, norm, claimed } = require('./tracker');
 const { GitWatch, git, show } = require('./git');
 
 const SCHEME = 'claude-diff';
@@ -26,6 +26,8 @@ const IDLE_SCAN_MS = 15 * 1000;
 const LEGACY_HOOK_FILE = 'claude-diff-hook.js';
 /** In a git repository, a change waits this long before it is called Claude's: git may still be writing (see git.js). */
 const GIT_SETTLE_MS = 1500;
+/** How long a change waits for a tool call of Claude that explains it (the transcript may lag). */
+const VERIFY_MS = 5000;
 /** A change can be noticed by a scan a while after the commit that holds it. */
 const COMMIT_MEMORY_MS = 60 * 1000;
 
@@ -1484,6 +1486,35 @@ async function activate(context) {
     }
     return flushed;
   };
+  /**
+   * Changes seen while Claude works but not yet matched with one of its tool calls: norm(path) ->
+   * {file, before, at}. A script or a build writes files Claude never asked for; those are dropped.
+   */
+  const unverified = new Map();
+  const accept = async (file, before) => {
+    if (gitWatch.active) {
+      held.set(norm(file), { file, before, at: Date.now() }); // git may be about to claim it
+    } else {
+      log.info(`changed by Claude: ${file}${before === null ? ' (new)' : ''}`);
+      await writeSnapshot(file, before, 'claude');
+    }
+  };
+  const verifyChanges = async () => {
+    if (!unverified.size) return 0;
+    const claims = await activity.claims(folderPaths());
+    let accepted = 0;
+    for (const [key, u] of [...unverified]) {
+      if (claimed(claims, u.file, folderPaths())) {
+        unverified.delete(key);
+        await accept(u.file, u.before);
+        accepted++;
+      } else if (Date.now() - u.at > VERIFY_MS) {
+        unverified.delete(key);
+        log.info(`not Claude's (no tool call names it, probably a script or build output): ${u.file}`);
+      }
+    }
+    return accepted;
+  };
   let wasActive = false;
   /** When a check last saw Claude idle (its transcript silent). */
   let idleSeenAt = 0;
@@ -1521,8 +1552,9 @@ async function activate(context) {
       await rebasePending(g.fresh);
       await refresh();
     }
+    const verified = await verifyChanges();
     const flushed = await flushHeld();
-    if (flushed) await refresh();
+    if (flushed || verified) await refresh();
 
     const checkedAt = Date.now();
     const last = await activity.last(folders);
@@ -1541,14 +1573,9 @@ async function activate(context) {
     const made = await tracker.sync(
       folders,
       attribute,
-      (key) => trackedFiles.has(key) || held.has(key),
+      (key) => trackedFiles.has(key) || held.has(key) || unverified.has(key),
       async (file, before) => {
-        if (gitWatch.active) {
-          held.set(norm(file), { file, before, at: Date.now() }); // git may be about to claim it
-        } else {
-          log.info(`changed by Claude: ${file}${before === null ? ' (new)' : ''}`);
-          await writeSnapshot(file, before, 'claude');
-        }
+        unverified.set(norm(file), { file, before, at: Date.now() });
       },
       (key) => gitWatch.take(key)
     );
